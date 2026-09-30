@@ -1,677 +1,691 @@
 # Part 103: NLP สำหรับ Thai Language Processing
-
 ## Road to 1,000,000 Users/Day — chuaikan.com
 
 > **Level:** World Class
 > **Steps:** 1021-1030
-> **เวลาโดยประมาณ:** 5 ชั่วโมง
-> **Prerequisites:** Part 101 (AI/ML Integration), Part 102 (Computer Vision)
+> **เวลาโดยประมาณ:** 12 ชั่วโมง
+> **Prerequisites:** Part 072 (Kafka), Part 075 (Push Notifications), Part 016 (API Design)
 
 ---
 
 ## 🎯 สิ่งที่จะได้เรียนรู้ใน Part นี้
 
-ภาษาไทยมีความท้าทายพิเศษสำหรับ NLP เพราะไม่มีช่องว่างระหว่างคำ ใน Part นี้เราจะ:
-
-- ตัดคำภาษาไทยด้วย PyThaiNLP
-- วิเคราะห์ความรู้สึก (Sentiment) ของ SOS content
-- แยกหมวดหมู่ emergency: น้ำท่วม ไฟไหม้ อุบัติเหตุ
-- ดึงชื่อสถานที่จากข้อความ SOS (Named Entity Recognition)
-- ใช้ Claude AI API สำหรับ complex content moderation
+- ความท้าทายของภาษาไทย: ไม่มีช่องว่างระหว่างคำ
+- PyThaiNLP 5.x: word tokenization, POS tagging, NER
+- Thai NLP ใน Node.js ผ่าน Python subprocess
+- Sentiment analysis สำหรับ SOS content moderation
+- Thai keyword extraction และ text classification
+- Named Entity Recognition: ดึงชื่อสถานที่จาก SOS
+- Multilingual embeddings สำหรับ semantic search
+- FastAPI microservice สำหรับ NLP
+- Integration กับ SOS service
 
 ---
 
 ## 📖 ทฤษฎีและแนวคิด
 
-### 1. ความท้าทายของภาษาไทย
+### ทำไมภาษาไทยถึงยาก?
 
 ```
-ภาษาอังกฤษ: "flood in my area"
-ตัดคำ:       "flood" | "in" | "my" | "area"
-
-ภาษาไทย:     "น้ำท่วมที่บ้าน"
-ปัญหา:       ไม่มี space! ต้องรู้จักคำก่อนถึงตัดได้
-ตัดคำที่ถูก: "น้ำ" | "ท่วม" | "ที่" | "บ้าน"
-หรือ:        "น้ำท่วม" | "ที่" | "บ้าน"  (better!)
-
-ภาษาไทยยังมี:
-- Polysemy: คำเดียวกันความหมายต่างกัน ("ขัน" = bucket หรือ funny?)
-- Abbreviations: "น.ท." = น้ำท่วม หรือ นาวาโท
-- Informal language: "ขอความช่วยเหลือด้วยย" (คำลงท้ายที่ยืด)
+ภาษาอังกฤษ: "flood in Ayutthaya very serious"
+                ↕ ง่าย: แบ่งด้วย space
+ภาษาไทย:    "น้ำท่วมที่อยุธยาหนักมาก"
+                ↕ ยาก: ไม่มีช่องว่าง!
+ต้องแบ่งเป็น: น้ำท่วม / ที่ / อยุธยา / หนัก / มาก
 ```
 
-### 2. NLP Use Cases สำหรับ chuaikan.com
+### ขั้นตอน NLP Pipeline สำหรับ SOS
 
 ```
-SOS Text: "น้ำท่วมสูงมากแล้วถนนพหลโยธิน กม.50 ใกล้วัดมีชัยภิกขุ 
-          ขอความช่วยเหลือด้วยครับ มีผู้สูงอายุติดอยู่ 3 คน"
-
-NLP Tasks:
-1. Emergency Category: floods ✓
-2. Location NER: ถนนพหลโยธิน กม.50, วัดมีชัยภิกขุ
-3. Severity: High (ผู้สูงอายุ, ติดอยู่)
-4. Keyword Extraction: น้ำท่วม, ถนน, ขอความช่วยเหลือ, ผู้สูงอายุ
-5. Sentiment: Urgent/Distress
+SOS Text Input (Thai)
+    ↓ Word Tokenization (newmm engine)
+    ↓ POS Tagging
+    ↓ Named Entity Recognition (location)
+    ↓ Sentiment Analysis (urgent/normal)
+    ↓ Classification (flood/fire/accident/other)
+    ↓ Keyword Extraction
+Output → structured JSON สำหรับ SOS system
 ```
 
 ---
 
 ## ⚙️ Environment Setup
 
+### Step 1021: ติดตั้ง Python Environment
+
 ```bash
-# ติดตั้ง PyThaiNLP
-pip install pythainlp[full]
+# ติดตั้ง Python 3.11 (บน Ubuntu 24.04)
+sudo apt update
+sudo apt install -y python3.11 python3.11-venv python3-pip
 
-# ดาวน์โหลด Thai language models
+# สร้าง virtual environment สำหรับ NLP service
+python3.11 -m venv /opt/chuaikan-nlp/venv
+source /opt/chuaikan-nlp/venv/bin/activate
+
+# ติดตั้ง PyThaiNLP และ dependencies
+pip install \
+  pythainlp==5.0.0 \
+  fastapi==0.115.0 \
+  uvicorn==0.30.0 \
+  scikit-learn==1.5.0 \
+  sentence-transformers==3.1.0 \
+  numpy==1.26.0 \
+  pandas==2.2.0 \
+  transformers==4.44.0 \
+  torch==2.4.0 \
+  anthropic==0.34.0
+
+# Download Thai dictionaries สำหรับ PyThaiNLP
 python -c "from pythainlp.corpus import download; download('best')"
-python -c "from pythainlp.corpus import download; download('newmm-wordseg-20210101')"
+python -c "from pythainlp.corpus import download; download('tha-wikitext-20210620-newmm')"
+```
 
-# ติดตั้ง transformers สำหรับ BERT-based Thai models
-pip install transformers torch sentencepiece
+### Step 1022: ทดสอบ PyThaiNLP พื้นฐาน
 
-# ติดตั้ง aiforthai packages
-pip install wangchanberta  # Thai BERT by NECTEC
+```python
+# test_pythainlp.py
+from pythainlp.tokenize import word_tokenize
+from pythainlp.tag import pos_tag
+from pythainlp.corpus.common import thai_words
+
+# Word tokenization
+text = "น้ำท่วมหนักมากที่อยุธยา ต้องการความช่วยเหลือด่วน"
+tokens = word_tokenize(text, engine="newmm")
+print("Tokens:", tokens)
+# Output: ['น้ำท่วม', 'หนัก', 'มาก', 'ที่', 'อยุธยา', ' ', 'ต้องการ', 'ความ', 'ช่วยเหลือ', 'ด่วน']
+
+# POS Tagging
+pos = pos_tag(tokens, corpus="orchid_ud")
+print("POS:", pos)
+# Output: [('น้ำท่วม', 'NOUN'), ('หนัก', 'ADJ'), ...]
+
+# Named Entity Recognition
+from pythainlp.tag import ner
+entities = ner(text, pos_tag="perceptron", corpus="thainer")
+print("Entities:", entities)
+# Output: [('น้ำท่วม', 'O'), ('อยุธยา', 'B-LOC'), ...]
 ```
 
 ---
 
 ## 🛠️ Step-by-Step Implementation
 
-### Step 1021: Thai Word Segmentation
+### Step 1023: FastAPI NLP Microservice
 
 ```python
-# thai-tokenizer.py
-from pythainlp.tokenize import word_tokenize, sent_tokenize
-from pythainlp.corpus.common import thai_stopwords
-import re
+# /opt/chuaikan-nlp/app/main.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Optional, List
+import logging
 
-class ThaiTextProcessor:
-    def __init__(self):
-        self.stopwords = set(thai_stopwords())
-        # เพิ่ม stopwords เฉพาะ chuaikan
-        self.stopwords.update(['ครับ', 'ค่ะ', 'นะ', 'นะครับ', 'ด้วย', 'หน่อย'])
-    
-    def tokenize(self, text, engine='newmm'):
-        """
-        ตัดคำภาษาไทย
-        engine options:
-        - 'newmm': fastest, most accurate (แนะนำ)
-        - 'attacut': ดีสำหรับ informal text
-        - 'deepcut': deep learning based (ช้าแต่ accurate กว่า)
-        """
-        # clean text ก่อน
-        text = self._preprocess(text)
-        
-        tokens = word_tokenize(text, engine=engine, keep_whitespace=False)
-        
-        # Remove stopwords และ tokens สั้นเกินไป
-        tokens = [t for t in tokens if t not in self.stopwords and len(t) > 1]
-        
-        return tokens
-    
-    def _preprocess(self, text):
-        """Clean text ก่อน processing"""
-        # Remove URLs
-        text = re.sub(r'http\S+', '', text)
-        
-        # Remove phone numbers
-        text = re.sub(r'0[0-9]{8,9}', '[PHONE]', text)
-        
-        # Normalize repeated characters (ด้วยยยย → ด้วย)
-        text = re.sub(r'(.)\1{2,}', r'\1\1', text)
-        
-        # Remove special chars ยกเว้น Thai, English, digits
-        text = re.sub(r'[^฀-๿a-zA-Z0-9\s.,?!]', '', text)
-        
-        return text.strip()
-    
-    def extract_keywords(self, text, top_k=10):
-        """ดึง keywords สำคัญจากข้อความ"""
-        from pythainlp.util.trie import Trie
-        
-        tokens = self.tokenize(text)
-        
-        # Word frequency (simple approach)
-        from collections import Counter
-        freq = Counter(tokens)
-        
-        # TF-IDF แบบง่าย (ใน production ควรใช้ sklearn)
-        keywords = [(word, count) for word, count in freq.most_common(top_k)]
-        
-        return keywords
+from .nlp_processor import ThaiNLPProcessor
+from .sentiment import ThaiSentimentAnalyzer
+from .classifier import SOSClassifier
 
-# ทดสอบ
-processor = ThaiTextProcessor()
+app = FastAPI(title="Thai NLP Service", version="1.0.0")
+logger = logging.getLogger(__name__)
 
-sos_text = "น้ำท่วมสูงมากแล้วถนนพหลโยธิน กม.50 ขอความช่วยเหลือด้วยครับ มีผู้สูงอายุติดอยู่ 3 คน"
+# Initialize processors (โหลดครั้งเดียวตอน startup)
+nlp = ThaiNLPProcessor()
+sentiment = ThaiSentimentAnalyzer()
+classifier = SOSClassifier()
 
-tokens = processor.tokenize(sos_text)
-print("Tokens:", tokens)
-# ['น้ำท่วม', 'สูง', 'มาก', 'แล้ว', 'ถนน', 'พหลโยธิน', 'กม', '50', 'ขอความช่วยเหลือ', 'ผู้สูงอายุ', 'ติด', '3', 'คน']
+class AnalyzeRequest(BaseModel):
+    text: str
+    include_entities: bool = True
+    include_sentiment: bool = True
+    include_classification: bool = True
+    include_keywords: bool = True
 
-keywords = processor.extract_keywords(sos_text)
-print("Keywords:", keywords)
+class AnalyzeResponse(BaseModel):
+    tokens: List[str]
+    entities: List[dict]
+    sentiment: Optional[dict]
+    classification: Optional[dict]
+    keywords: List[str]
+    locations: List[str]
+    processingMs: float
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze_text(request: AnalyzeRequest):
+    import time
+    start = time.time()
+
+    try:
+        result = nlp.analyze(request.text)
+        
+        if request.include_sentiment:
+            result['sentiment'] = sentiment.analyze(request.text)
+        
+        if request.include_classification:
+            result['classification'] = classifier.classify(request.text)
+        
+        result['processingMs'] = (time.time() - start) * 1000
+        return result
+
+    except Exception as e:
+        logger.error(f"NLP Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "pythainlp_version": "5.0.0"}
 ```
 
-### Step 1022: Thai Sentiment Analysis สำหรับ SOS
+### Step 1024: Thai NLP Processor
 
 ```python
-# thai-sentiment.py
-# วิเคราะห์ความเร่งด่วนของ SOS content
-
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-import torch
-
-class ThaiSentimentAnalyzer:
-    def __init__(self):
-        # ใช้ WangchanBERTa (Thai BERT จาก NECTEC/PyThaiNLP)
-        model_name = "airesearch/wangchanberta-base-att-spm-uncased"
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_name,
-            num_labels=3  # ฉุกเฉิน / เร่งด่วน / ทั่วไป
-        )
-        
-        # โหลด fine-tuned weights สำหรับ SOS classification
-        # (ต้อง fine-tune ก่อนด้วย SOS data)
-        checkpoint = torch.load('models/sos-urgency-classifier.pt')
-        self.model.load_state_dict(checkpoint)
-        self.model.eval()
-    
-    def classify_urgency(self, text):
-        """จำแนกระดับความเร่งด่วนของ SOS"""
-        inputs = self.tokenizer(
-            text,
-            return_tensors='pt',
-            max_length=512,
-            truncation=True,
-            padding=True
-        )
-        
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            logits = outputs.logits
-            probs = torch.softmax(logits, dim=1).squeeze()
-        
-        labels = ['general', 'urgent', 'critical']
-        predicted_label = labels[torch.argmax(probs).item()]
-        confidence = probs[torch.argmax(probs)].item()
-        
-        return {
-            'urgency': predicted_label,
-            'confidence': confidence,
-            'probabilities': {
-                label: float(prob)
-                for label, prob in zip(labels, probs)
-            }
-        }
-
-# Rule-based urgency keywords (fallback)
-CRITICAL_KEYWORDS = [
-    'ขอความช่วยเหลือ', 'ช่วยด้วย', 'ฉุกเฉิน', 'เร่งด่วน',
-    'ติดอยู่', 'ออกไม่ได้', 'อันตราย', 'บาดเจ็บ', 'หัวใจ',
-    'หมดสติ', 'หายใจไม่ออก', 'ไฟไหม้', 'คนจมน้ำ'
-]
-
-URGENT_KEYWORDS = [
-    'น้ำท่วม', 'น้ำสูง', 'ต้องการความช่วยเหลือ', 'รถติด',
-    'ถนนปิด', 'ไฟฟ้าดับ', 'แก๊สรั่ว'
-]
-
-def rule_based_urgency(text):
-    """Rule-based fallback ถ้า ML model ไม่พร้อม"""
-    text_lower = text.lower()
-    
-    for keyword in CRITICAL_KEYWORDS:
-        if keyword in text_lower:
-            return 'critical', 0.85
-    
-    for keyword in URGENT_KEYWORDS:
-        if keyword in text_lower:
-            return 'urgent', 0.80
-    
-    return 'general', 0.90
-```
-
-### Step 1023: Thai Named Entity Recognition
-
-```python
-# thai-ner.py
-# ดึงชื่อสถานที่จาก SOS text
-
-from pythainlp import word_tokenize
-from pythainlp.tag import pos_tag
+# /opt/chuaikan-nlp/app/nlp_processor.py
+from pythainlp.tokenize import word_tokenize
+from pythainlp.tag import pos_tag, ner
+from pythainlp.util.trie import Trie
+from pythainlp.corpus import thai_stopwords
+from collections import Counter
 import re
 
-class ThaiLocationExtractor:
-    """ดึงชื่อสถานที่จากข้อความ SOS"""
-    
-    # Thai location indicators
-    LOCATION_PREFIXES = [
-        'ถนน', 'ซอย', 'ตำบล', 'อำเภอ', 'จังหวัด', 'เขต', 'แขวง',
-        'หมู่บ้าน', 'หมู่', 'คลอง', 'บึง', 'สะพาน', 'วัด', 'โรงเรียน',
-        'โรงพยาบาล', 'ตลาด', 'กม.', 'กิโลเมตรที่'
-    ]
-    
-    PROVINCE_NAMES = [
-        'กรุงเทพ', 'เชียงใหม่', 'เชียงราย', 'ขอนแก่น', 'อุดรธานี',
-        'นครราชสีมา', 'สุราษฎร์ธานี', 'ภูเก็ต', 'สงขลา', 'นนทบุรี',
-        'ปทุมธานี', 'สมุทรปราการ', 'นครปฐม', 'ราชบุรี', 'พระนครศรีอยุธยา',
-        # ... (76 จังหวัด)
-    ]
-    
-    def extract_locations(self, text):
+# ชื่อจังหวัดไทยทั้งหมด สำหรับ location detection
+THAI_PROVINCES = {
+    "กรุงเทพ", "กรุงเทพมหานคร", "กทม", "เชียงใหม่", "เชียงราย",
+    "อยุธยา", "พระนครศรีอยุธยา", "นนทบุรี", "ปทุมธานี", "สมุทรปราการ",
+    "นครราชสีมา", "โคราช", "อุบลราชธานี", "ขอนแก่น", "อุดรธานี",
+    "สุราษฎร์ธานี", "นครศรีธรรมราช", "ภูเก็ต", "สงขลา", "หาดใหญ่",
+    "ชลบุรี", "พัทยา", "ระยอง", "นครปฐม", "กาญจนบุรี",
+}
+
+class ThaiNLPProcessor:
+    def __init__(self):
+        self.stopwords = thai_stopwords()
+        # Custom dictionary สำหรับ SOS terms
+        sos_words = ["น้ำท่วม", "ไฟไหม้", "อุบัติเหตุ", "ดินถล่ม", "วาตภัย", "แผ่นดินไหว"]
+        self.custom_trie = Trie(sos_words)
+        
+    def tokenize(self, text: str) -> list[str]:
+        """Word tokenization ด้วย newmm engine"""
+        # ทำความสะอาด text
+        text = re.sub(r'\s+', ' ', text.strip())
+        tokens = word_tokenize(text, engine="newmm", custom_dict=self.custom_trie)
+        return [t for t in tokens if t.strip()]  # ลบ whitespace tokens
+
+    def extract_entities(self, text: str) -> list[dict]:
+        """Named Entity Recognition"""
+        try:
+            tokens = self.tokenize(text)
+            tagged = ner(text, corpus="thainer")
+            
+            entities = []
+            current_entity = None
+            
+            for word, tag in tagged:
+                if tag.startswith('B-'):  # Beginning of entity
+                    if current_entity:
+                        entities.append(current_entity)
+                    current_entity = {'text': word, 'type': tag[2:], 'words': [word]}
+                elif tag.startswith('I-') and current_entity:  # Inside entity
+                    current_entity['text'] += word
+                    current_entity['words'].append(word)
+                else:
+                    if current_entity:
+                        entities.append(current_entity)
+                        current_entity = None
+            
+            if current_entity:
+                entities.append(current_entity)
+                
+            return entities
+        except Exception:
+            return []
+
+    def extract_locations(self, text: str) -> list[str]:
+        """ดึงชื่อสถานที่จากข้อความ"""
         locations = []
         
-        # Method 1: Rule-based — หา location prefixes
-        for prefix in self.LOCATION_PREFIXES:
-            pattern = f'{prefix}[ก-๙a-zA-Z0-9\\s]+(?=[\\s,.]|$)'
-            matches = re.findall(pattern, text)
-            locations.extend(matches)
-        
-        # Method 2: Province names
-        for province in self.PROVINCE_NAMES:
+        # ตรวจสอบชื่อจังหวัดที่รู้จัก
+        for province in THAI_PROVINCES:
             if province in text:
                 locations.append(province)
         
-        # Method 3: POS tagging — ดึง NE (Named Entities)
-        tokens_with_pos = pos_tag(word_tokenize(text), corpus='orchid_ud')
+        # ดึงจาก NER entities ด้วย
+        entities = self.extract_entities(text)
+        for entity in entities:
+            if entity['type'] in ('LOC', 'GPE'):
+                locations.append(entity['text'])
         
-        # ใน orchid tagset: NNP = proper noun (ชื่อสถานที่ มักจะเป็น NNP)
-        current_ne = []
-        for token, pos in tokens_with_pos:
-            if pos in ['NNP', 'NE']:
-                current_ne.append(token)
-            else:
-                if current_ne:
-                    locations.append(''.join(current_ne))
-                    current_ne = []
-        
-        # Remove duplicates และ clean
-        locations = list(set([l.strip() for l in locations if len(l.strip()) > 2]))
-        
-        return locations
-    
-    def geocode_location(self, location_text):
-        """แปลงชื่อสถานที่เป็น coordinates (Google Maps API)"""
-        import googlemaps
-        
-        gmaps = googlemaps.Client(key=os.environ['GOOGLE_MAPS_API_KEY'])
-        
-        # เพิ่ม "ประเทศไทย" เพื่อเพิ่ม accuracy
-        query = f"{location_text} ประเทศไทย"
-        
-        result = gmaps.geocode(query)
-        
-        if result:
-            location = result[0]['geometry']['location']
-            return {
-                'lat': location['lat'],
-                'lng': location['lng'],
-                'formatted_address': result[0]['formatted_address'],
-                'place_id': result[0]['place_id'],
-            }
-        
-        return None
+        return list(set(locations))  # ลบ duplicates
 
-# ทดสอบ
-extractor = ThaiLocationExtractor()
+    def extract_keywords(self, text: str, top_n: int = 10) -> list[str]:
+        """Extract keywords โดยใช้ TF-IDF หลักการ"""
+        tokens = self.tokenize(text)
+        
+        # ลบ stopwords และ tokens สั้นๆ
+        meaningful_tokens = [
+            t for t in tokens
+            if t not in self.stopwords and len(t) > 1 and not t.isdigit()
+        ]
+        
+        # Count frequency
+        freq = Counter(meaningful_tokens)
+        return [word for word, _ in freq.most_common(top_n)]
 
-sos_text = "น้ำท่วมสูงมากที่ถนนพหลโยธิน กม.50 ใกล้วัดมีชัยภิกขุ อำเภอเมือง จังหวัดเชียงใหม่"
-
-locations = extractor.extract_locations(sos_text)
-print("Extracted locations:", locations)
-# ['ถนนพหลโยธิน กม.50', 'วัดมีชัยภิกขุ', 'อำเภอเมือง', 'จังหวัดเชียงใหม่']
-
-# Geocode ทั้งหมด
-for loc in locations:
-    coords = extractor.geocode_location(loc)
-    if coords:
-        print(f"{loc}: {coords['lat']}, {coords['lng']}")
+    def analyze(self, text: str) -> dict:
+        """Full NLP analysis"""
+        tokens = self.tokenize(text)
+        entities = self.extract_entities(text)
+        locations = self.extract_locations(text)
+        keywords = self.extract_keywords(text)
+        
+        return {
+            'tokens': tokens,
+            'entities': entities,
+            'locations': locations,
+            'keywords': keywords,
+        }
 ```
 
-### Step 1024: Emergency Category Classification
+### Step 1025: Sentiment Analysis
 
 ```python
-# emergency-classifier.py
-# จำแนกประเภทภัยพิบัติ
-
+# /opt/chuaikan-nlp/app/sentiment.py
+from pythainlp.sentiment import sentiment as thai_sentiment
 from pythainlp.tokenize import word_tokenize
 
-EMERGENCY_CATEGORIES = {
-    'flood': {
-        'keywords': ['น้ำท่วม', 'น้ำสูง', 'น้ำป่า', 'น้ำเอ่อ', 'น้ำขัง', 'ดินโคลน'],
-        'severity_modifiers': {
-            'high': ['สูงมาก', 'ท่วมหลังคา', 'ท่วมชั้น2', 'ไม่สามารถออก'],
-            'medium': ['ท่วมเอว', 'ท่วมอก', 'ท่วมหัวเข่า'],
-            'low': ['ท่วมเล็กน้อย', 'น้ำขังนิดหน่อย'],
-        }
-    },
-    'fire': {
-        'keywords': ['ไฟไหม้', 'เพลิงไหม้', 'ไฟลุก', 'ควันไฟ', 'เพลิง'],
-        'severity_modifiers': {
-            'high': ['ควบคุมไม่ได้', 'ลุกลาม', 'อาคารไหม้'],
-            'medium': ['ไฟลุก', 'ต้องการดับเพลิง'],
-            'low': ['ควันไฟ', 'ไฟเล็กน้อย'],
-        }
-    },
-    'accident': {
-        'keywords': ['อุบัติเหตุ', 'รถชน', 'รถคว่ำ', 'ชนกัน', 'สิ่งกีดขวาง'],
-        'severity_modifiers': {
-            'high': ['บาดเจ็บสาหัส', 'หมดสติ', 'เลือดออกมาก'],
-            'medium': ['บาดเจ็บ', 'ต้องการรถพยาบาล'],
-            'low': ['รถเสีย', 'ถนนปิด'],
-        }
-    },
-    'medical': {
-        'keywords': ['เจ็บป่วย', 'หัวใจ', 'หายใจไม่ออก', 'หมดสติ', 'ล้มหมดสติ'],
-        'severity_modifiers': {
-            'high': ['หัวใจวาย', 'หมดสติ', 'ชัก'],
-            'medium': ['เจ็บปวดมาก', 'ต้องการแพทย์'],
-            'low': ['ไม่สบาย', 'ต้องการความช่วยเหลือ'],
-        }
-    },
+# Keywords ที่บ่งบอกความด่วน
+URGENCY_KEYWORDS = {
+    "ด่วน", "ฉุกเฉิน", "เร่งด่วน", "ช่วยด้วย", "ขอความช่วยเหลือ",
+    "อันตราย", "อันตรายมาก", "ติดอยู่", "จมน้ำ", "บาดเจ็บ", "เสียชีวิต",
+    "ไฟไหม้", "ระเบิด", "ดินถล่ม", "น้ำท่วมสูง",
 }
 
-def classify_emergency(text):
-    """จำแนกประเภทและระดับความรุนแรงของ emergency"""
-    
-    tokens = word_tokenize(text, engine='newmm')
-    text_joined = ' '.join(tokens)
-    
-    detected_categories = []
-    
-    for category, data in EMERGENCY_CATEGORIES.items():
-        # ตรวจ keywords
-        keyword_matches = [k for k in data['keywords'] if k in text_joined]
+SEVERITY_KEYWORDS = {
+    "critical": {"เสียชีวิต", "จมน้ำ", "ระเบิด", "ไฟไหม้ลาม"},
+    "high": {"บาดเจ็บสาหัส", "ติดอยู่", "น้ำท่วมสูง", "ต้องการความช่วยเหลือด่วน"},
+    "medium": {"น้ำท่วม", "ไฟไหม้", "อุบัติเหตุ", "บาดเจ็บ"},
+    "low": {"น้ำขัง", "ถนนลื่น", "ต้นไม้ล้ม"},
+}
+
+class ThaiSentimentAnalyzer:
+    def analyze(self, text: str) -> dict:
+        """
+        Analyze sentiment ของ SOS text
+        Returns: { sentiment, urgency_score, severity, is_urgent }
+        """
+        # Basic sentiment
+        try:
+            base_sentiment = thai_sentiment(text)  # positive/negative/neutral
+        except Exception:
+            base_sentiment = "neutral"
         
-        if keyword_matches:
-            # วิเคราะห์ severity
-            severity = 'medium'
-            for level, modifiers in data['severity_modifiers'].items():
-                if any(m in text_joined for m in modifiers):
-                    severity = level
-                    break
-            
-            detected_categories.append({
-                'category': category,
-                'severity': severity,
-                'matched_keywords': keyword_matches,
-            })
-    
-    if not detected_categories:
+        tokens = set(word_tokenize(text, engine="newmm"))
+        
+        # Urgency score (0.0 - 1.0)
+        urgency_count = len(tokens & URGENCY_KEYWORDS)
+        urgency_score = min(urgency_count / 3.0, 1.0)
+        
+        # Severity level
+        severity = "low"
+        for level in ("critical", "high", "medium", "low"):
+            if tokens & SEVERITY_KEYWORDS[level]:
+                severity = level
+                break
+        
         return {
-            'category': 'unknown',
-            'severity': 'unknown',
-            'requires_human_review': True
+            "sentiment": base_sentiment,
+            "urgency_score": round(urgency_score, 2),
+            "severity": severity,
+            "is_urgent": urgency_score > 0.3 or severity in ("critical", "high"),
         }
-    
-    # Return primary category (ที่มี keyword matches มากที่สุด)
-    primary = max(detected_categories, key=lambda x: len(x['matched_keywords']))
-    
+```
+
+### Step 1026: SOS Text Classifier
+
+```python
+# /opt/chuaikan-nlp/app/classifier.py
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from pythainlp.tokenize import word_tokenize
+import pickle
+import os
+
+# Training data (ตัวอย่างขั้นต่ำ - ใน production ใช้ dataset จริง)
+TRAINING_DATA = [
+    # flood
+    ("น้ำท่วมถนน บ้านจมน้ำ ต้องการเรือ", "flood"),
+    ("น้ำท่วมสูงมาก ระดับน้ำขึ้นเร็ว อพยพไม่ทัน", "flood"),
+    ("น้ำท่วมหนักที่อยุธยา ขอความช่วยเหลือ", "flood"),
+    # fire
+    ("ไฟไหม้บ้านข้างๆ ควันลาม ขอรถดับเพลิง", "fire"),
+    ("เพลิงไหม้โรงงาน เปลวไฟสูง ไม่มีใครช่วย", "fire"),
+    # accident
+    ("รถชนกันบนทางหลวง มีคนบาดเจ็บ ต้องการรถพยาบาล", "accident"),
+    ("อุบัติเหตุรถมอเตอร์ไซค์ บาดเจ็บสาหัส", "accident"),
+    # other
+    ("ต้นไม้ล้มทับรถ ต้องการความช่วยเหลือ", "other"),
+    ("ไฟฟ้าดับทั้งหมู่บ้าน ลมแรงมาก", "other"),
+]
+
+class SOSClassifier:
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(
+            analyzer=self._thai_tokenizer,
+            ngram_range=(1, 2),
+            max_features=5000,
+        )
+        self.model = MultinomialNB(alpha=0.1)
+        self._train()
+
+    def _thai_tokenizer(self, text: str) -> list[str]:
+        return word_tokenize(text, engine="newmm")
+
+    def _train(self):
+        texts, labels = zip(*TRAINING_DATA)
+        X = self.vectorizer.fit_transform(texts)
+        self.model.fit(X, labels)
+
+    def classify(self, text: str) -> dict:
+        X = self.vectorizer.transform([text])
+        prediction = self.model.predict(X)[0]
+        probabilities = self.model.predict_proba(X)[0]
+        classes = self.model.classes_
+
+        confidence = dict(zip(classes, [round(p, 3) for p in probabilities]))
+
+        return {
+            "category": prediction,
+            "confidence": confidence,
+            "top_category": prediction,
+            "confidence_score": round(max(probabilities), 3),
+        }
+```
+
+### Step 1027: Semantic Search ด้วย Embeddings
+
+```python
+# /opt/chuaikan-nlp/app/embeddings.py
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/embeddings")
+
+# Multilingual model รองรับภาษาไทย
+model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+
+@router.post("/encode")
+async def encode_text(request: dict):
+    """
+    แปลง text เป็น vector embedding สำหรับ semantic search
+    Model: paraphrase-multilingual-MiniLM-L12-v2 (384 dimensions)
+    """
+    text = request.get('text', '')
+    embedding = model.encode(text, normalize_embeddings=True)
+    return {"embedding": embedding.tolist(), "dimensions": len(embedding)}
+
+@router.post("/similar")
+async def find_similar(request: dict):
+    """
+    หา similarity ระหว่างข้อความ 2 ข้อความ
+    """
+    text1 = request.get('text1', '')
+    text2 = request.get('text2', '')
+
+    embeddings = model.encode([text1, text2], normalize_embeddings=True)
+    similarity = float(np.dot(embeddings[0], embeddings[1]))
+
     return {
-        'primary_category': primary['category'],
-        'severity': primary['severity'],
-        'all_categories': detected_categories,
-        'requires_human_review': primary['severity'] == 'high',
+        "similarity": round(similarity, 4),
+        "are_similar": similarity > 0.7,
     }
 ```
 
-### Step 1025: Claude AI สำหรับ Content Moderation
+### Step 1028: Node.js Integration
 
-```python
-# claude-moderation.py
-# ใช้ Claude AI สำหรับ complex cases ที่ rule-based ไม่เพียงพอ
+```typescript
+// src/lib/nlp/thai-nlp-client.ts
+import axios from 'axios';
 
-import anthropic
-import json
+const NLP_SERVICE_URL = process.env.NLP_SERVICE_URL || 'http://localhost:8001';
 
-client = anthropic.Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+export interface NLPAnalysisResult {
+  tokens: string[];
+  entities: Array<{ text: string; type: string }>;
+  locations: string[];
+  keywords: string[];
+  sentiment?: {
+    sentiment: string;
+    urgency_score: number;
+    severity: 'low' | 'medium' | 'high' | 'critical';
+    is_urgent: boolean;
+  };
+  classification?: {
+    category: 'flood' | 'fire' | 'accident' | 'other';
+    confidence_score: number;
+  };
+  processingMs: number;
+}
 
-def moderate_sos_content(text, image_analysis=None):
-    """
-    ใช้ Claude สำหรับ complex moderation decisions
-    Call นี้มี cost ดังนั้นใช้เฉพาะกรณีที่ rule-based ไม่แน่ใจ
-    """
-    
-    context_parts = [f"SOS Text: {text}"]
-    if image_analysis:
-        context_parts.append(f"Image Analysis: {json.dumps(image_analysis)}")
-    
-    prompt = f"""You are a content moderator for chuaikan.com, a disaster response platform in Thailand.
+export async function analyzeThaiText(text: string): Promise<NLPAnalysisResult> {
+  const response = await axios.post<NLPAnalysisResult>(
+    `${NLP_SERVICE_URL}/analyze`,
+    {
+      text,
+      include_entities: true,
+      include_sentiment: true,
+      include_classification: true,
+      include_keywords: true,
+    },
+    { timeout: 5000 }
+  );
+  return response.data;
+}
 
-{chr(10).join(context_parts)}
+export async function getTextEmbedding(text: string): Promise<number[]> {
+  const response = await axios.post<{ embedding: number[] }>(
+    `${NLP_SERVICE_URL}/embeddings/encode`,
+    { text },
+    { timeout: 10000 }
+  );
+  return response.data.embedding;
+}
+```
 
-Please analyze this SOS post and respond with a JSON object:
-{{
-  "is_genuine_emergency": true/false,
-  "emergency_type": "flood/fire/accident/medical/other/unknown",
-  "severity": "critical/high/medium/low",
-  "is_inappropriate": true/false,
-  "requires_immediate_response": true/false,
-  "location_mentioned": "location or null",
-  "reason": "brief explanation in Thai",
-  "confidence": 0.0-1.0
-}}
+### Step 1029: Auto-categorize SOS Posts
 
-Consider:
-- Thai language nuances and informal expressions
-- Context of Thailand's disaster response
-- Whether this seems like a genuine call for help vs spam/test
-- Severity based on described situation"""
+```typescript
+// src/services/sos-nlp-service.ts
+import { analyzeThaiText } from '../lib/nlp/thai-nlp-client';
+import { getTextEmbedding } from '../lib/nlp/thai-nlp-client';
+import { db } from '../lib/db/postgres';
+import Anthropic from '@anthropic-ai/sdk';
 
-    message = client.messages.create(
-        model="claude-3-5-haiku-20241022",  # ใช้ Haiku เพราะเร็วและถูกกว่า
-        max_tokens=500,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
-    
-    response_text = message.content[0].text
-    
-    try:
-        # Parse JSON response
-        result = json.loads(response_text)
-        return result
-    except json.JSONDecodeError:
-        # ถ้า parse ไม่ได้ → ส่ง human review
-        return {
-            'requires_human_review': True,
-            'parse_error': True,
-            'raw_response': response_text
-        }
+const anthropic = new Anthropic();
 
-# Caching สำหรับ similar content (ประหยัด API cost)
-from functools import lru_cache
-import hashlib
+export async function processSOSPost(postId: string, content: string): Promise<{
+  category: string;
+  severity: string;
+  locations: string[];
+  isUrgent: boolean;
+}> {
+  let category = 'other';
+  let severity = 'medium';
+  let locations: string[] = [];
+  let isUrgent = false;
 
-@lru_cache(maxsize=1000)
-def cached_moderate(text_hash, text):
-    return moderate_sos_content(text)
+  try {
+    // ใช้ PyThaiNLP เป็นหลัก
+    const nlpResult = await analyzeThaiText(content);
 
-def moderate_with_cache(text, image_analysis=None):
-    # Create hash สำหรับ cache key
-    text_hash = hashlib.md5(text.encode()).hexdigest()
-    
-    if image_analysis:
-        # มี image → ต้อง analyze ใหม่ (ไม่ cache)
-        return moderate_sos_content(text, image_analysis)
-    
-    return cached_moderate(text_hash, text)
+    category = nlpResult.classification?.category || 'other';
+    severity = nlpResult.sentiment?.severity || 'medium';
+    locations = nlpResult.locations;
+    isUrgent = nlpResult.sentiment?.is_urgent || false;
+
+    // ถ้า confidence ต่ำ ใช้ Claude AI เป็น fallback
+    if ((nlpResult.classification?.confidence_score || 0) < 0.6) {
+      const claudeResult = await fallbackToClaudeAI(content);
+      category = claudeResult.category;
+      severity = claudeResult.severity;
+      if (claudeResult.locations.length > 0) {
+        locations = claudeResult.locations;
+      }
+    }
+
+    // บันทึก embedding สำหรับ semantic search
+    const embedding = await getTextEmbedding(content);
+
+    // อัพเดท SOS post
+    await db.query(
+      `UPDATE posts SET
+         sos_category = $2,
+         sos_severity = $3,
+         location_province = COALESCE($4, location_province),
+         embedding = $5,
+         nlp_processed_at = NOW()
+       WHERE id = $1`,
+      [postId, category, severity, locations[0], JSON.stringify(embedding)]
+    );
+
+    console.log(`[NLP] SOS ${postId}: ${category}/${severity} locations=${locations.join(',')}`);
+
+  } catch (error) {
+    console.error('[NLP] Processing failed:', error);
+  }
+
+  return { category, severity, locations, isUrgent };
+}
+
+async function fallbackToClaudeAI(content: string) {
+  const message = await anthropic.messages.create({
+    model: 'claude-opus-4-5',
+    max_tokens: 256,
+    messages: [
+      {
+        role: 'user',
+        content: `วิเคราะห์ข้อความ SOS ภาษาไทยต่อไปนี้และตอบเป็น JSON เท่านั้น:
+"${content}"
+
+Format: {"category": "flood|fire|accident|other", "severity": "low|medium|high|critical", "locations": ["province_name"]}`,
+      },
+    ],
+  });
+
+  const text = message.content[0].type === 'text' ? message.content[0].text : '{}';
+  return JSON.parse(text);
+}
 ```
 
 ---
 
 ## 🔧 Configuration Files
 
-### Kubernetes Deployment สำหรับ NLP Service
+### Systemd Service สำหรับ FastAPI NLP
 
-```yaml
-# nlp-service-deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nlp-service
-  namespace: production
-spec:
-  replicas: 3
-  template:
-    spec:
-      containers:
-      - name: nlp-service
-        image: chuaikan/nlp-service:latest
-        resources:
-          requests:
-            cpu: "500m"
-            memory: "1Gi"
-          limits:
-            cpu: "2000m"
-            memory: "4Gi"  # NLP models ใช้ memory เยอะ
-        env:
-        - name: ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: ai-credentials
-              key: anthropic-api-key
-        - name: GOOGLE_MAPS_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: maps-credentials
-              key: google-maps-key
-        - name: MODEL_CACHE_DIR
-          value: "/models"
-        volumeMounts:
-        - name: model-cache
-          mountPath: /models
-      volumes:
-      - name: model-cache
-        persistentVolumeClaim:
-          claimName: nlp-model-cache
+```bash
+sudo tee /etc/systemd/system/chuaikan-nlp.service << 'EOF'
+[Unit]
+Description=Chuaikan Thai NLP Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/chuaikan-nlp
+Environment="PATH=/opt/chuaikan-nlp/venv/bin"
+ExecStart=/opt/chuaikan-nlp/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --workers 4
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable chuaikan-nlp
+sudo systemctl start chuaikan-nlp
 ```
 
 ---
 
 ## 🧪 Testing
 
-### NLP Pipeline Test
+### Test PyThaiNLP
 
-```python
-# test-thai-nlp.py
-import pytest
+```bash
+# Test basic tokenization
+curl -X POST http://localhost:8001/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text":"น้ำท่วมหนักมากที่อยุธยา ต้องการความช่วยเหลือด่วน"}'
+```
 
-class TestThaiNLP:
-    def test_word_tokenization(self):
-        processor = ThaiTextProcessor()
-        
-        result = processor.tokenize("น้ำท่วมที่บ้านฉัน")
-        
-        # ต้องตัดได้ถูกต้อง
-        assert 'น้ำท่วม' in result or ('น้ำ' in result and 'ท่วม' in result)
-        assert 'บ้าน' in result
-    
-    def test_emergency_classification_flood(self):
-        result = classify_emergency("น้ำท่วมสูงมากที่บ้านผม ขอความช่วยเหลือ")
-        
-        assert result['primary_category'] == 'flood'
-        assert result['severity'] in ['high', 'critical']
-    
-    def test_location_extraction(self):
-        extractor = ThaiLocationExtractor()
-        text = "เกิดอุบัติเหตุที่ถนนพหลโยธิน กม.50 จังหวัดเชียงใหม่"
-        
-        locations = extractor.extract_locations(text)
-        
-        assert any('พหลโยธิน' in loc for loc in locations)
-        assert any('เชียงใหม่' in loc for loc in locations)
-    
-    def test_stopword_removal(self):
-        processor = ThaiTextProcessor()
-        
-        text = "ขอความช่วยเหลือด้วยนะครับ"
-        tokens = processor.tokenize(text)
-        
-        # stopwords ต้องถูกลบออก
-        assert 'ครับ' not in tokens
-        assert 'นะ' not in tokens
-        
-        # keyword สำคัญต้องอยู่
-        assert 'ขอความช่วยเหลือ' in tokens or 'ความช่วยเหลือ' in tokens
+### Test Semantic Search
+
+```bash
+# ทดสอบ similarity
+curl -X POST http://localhost:8001/embeddings/similar \
+  -H "Content-Type: application/json" \
+  -d '{"text1":"น้ำท่วม","text2":"น้ำหลาก"}'
+# คาด: similarity > 0.8
 ```
 
 ---
 
 ## ❌ Common Errors & Solutions
 
-### Error 1: Thai Tokenization ผิดพลาด
+### Error 1: PyThaiNLP Dictionary ไม่พบ
 
-```python
-# ปัญหา: "น้ำท่วม" ถูกตัดเป็น "น้ำ" + "ท่วม" แทนที่จะเป็น "น้ำท่วม"
-
-# แก้: เพิ่มคำ custom ใน dictionary
-from pythainlp.corpus import add_to_custom_dict
-
-# เพิ่ม SOS-specific vocabulary
-emergency_terms = [
-    'น้ำท่วม', 'ไฟไหม้', 'ดินโคลน', 'น้ำป่า', 'แผ่นดินไหว',
-    'ขอความช่วยเหลือ', 'ติดอยู่', 'ออกไม่ได้', 'ต้องการความช่วยเหลือ',
-]
-
-for term in emergency_terms:
-    add_to_custom_dict(term)
+```
+FileNotFoundError: [Errno 2] No such file or directory: 'best'
 ```
 
-### Error 2: Claude API Rate Limit
-
+**แก้ไข:**
 ```python
-# แก้: ใช้ exponential backoff + queue
+from pythainlp.corpus import download
+download('best')
+download('tha-wikitext-20210620-newmm')
+```
 
-import time
-import anthropic
+### Error 2: Out of Memory (BERT model)
 
-def call_claude_with_retry(prompt, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            return client.messages.create(...)
-        except anthropic.RateLimitError:
-            if attempt < max_retries - 1:
-                wait_time = (2 ** attempt) + random.random()
-                time.sleep(wait_time)
-            else:
-                raise
-        except anthropic.APIStatusError as e:
-            if e.status_code == 529:  # Overloaded
-                time.sleep(5)
-            else:
-                raise
+**สาเหตุ:** sentence-transformers โหลด model ใหญ่
+
+**แก้ไข:**
+```python
+# ใช้ quantized model
+model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+# ขนาด: ~470MB RAM (acceptable)
+```
+
+### Error 3: Thai Text Encoding
+
+**แก้ไข:**
+```python
+# ตั้งค่า encoding ใน Python
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 ```
 
 ---
 
 ## ✅ Checklist
 
-- [ ] PyThaiNLP ติดตั้งและ models download แล้ว
-- [ ] Emergency category classifier ทำงาน (accuracy > 90%)
-- [ ] Named Entity Recognition ดึงสถานที่ได้ (Recall > 80%)
-- [ ] Sentiment/Urgency classifier แม่นยำ
-- [ ] Geocoding สำหรับสถานที่ที่ดึงได้
-- [ ] Claude AI integration สำหรับ complex cases
-- [ ] Cost monitoring สำหรับ Claude API calls
-- [ ] Rate limiting และ retry logic
-- [ ] Custom dictionary สำหรับ emergency terms
-- [ ] Thai NLP unit tests ผ่าน
+- [ ] **Step 1021:** Python 3.11 + PyThaiNLP 5.x ติดตั้งสำเร็จ
+- [ ] **Step 1022:** `word_tokenize("น้ำท่วมที่อยุธยา")` ให้ผลลัพธ์ถูกต้อง
+- [ ] **Step 1023:** FastAPI NLP service รันที่ port 8001
+- [ ] **Step 1024:** NLP processor tokenize + NER ทำงานได้
+- [ ] **Step 1025:** Sentiment analysis ระบุ urgency ได้
+- [ ] **Step 1026:** Classifier จำแนก flood/fire/accident/other ได้
+- [ ] **Step 1027:** Sentence embeddings encode Thai text ได้
+- [ ] **Step 1028:** Node.js client เรียก NLP service สำเร็จ
+- [ ] **Step 1029:** SOS posts auto-categorize และ extract locations
+- [ ] **Step 1030:** Claude AI fallback ทำงานเมื่อ confidence ต่ำ
 
 ---
 
 ## 🔗 References
 
-- [PyThaiNLP Documentation](https://pythainlp.github.io/docs/)
-- [WangchanBERTa — Thai BERT](https://huggingface.co/airesearch/wangchanberta-base-att-spm-uncased)
-- [Claude API Documentation](https://docs.anthropic.com/)
-- [Thai NLP Resources](https://github.com/PyThaiNLP/pythainlp)
-- [Google Maps Geocoding API](https://developers.google.com/maps/documentation/geocoding)
+- [PyThaiNLP Documentation](https://pythainlp.github.io/pythainlp-doc/5.0/api/)
+- [Sentence Transformers](https://www.sbert.net/)
+- [FastAPI Documentation](https://fastapi.tiangolo.com/)
+- [ThaiNER Dataset](https://github.com/wannaphong/thai-ner)
 
 ---
-
 *Part 103 | Road to 1,000,000 Users/Day | chuaikan.com*
