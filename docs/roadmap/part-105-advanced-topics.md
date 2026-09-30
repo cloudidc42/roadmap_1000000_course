@@ -1,679 +1,716 @@
 # Part 105: Advanced Topics & Future Roadmap
-
 ## Road to 1,000,000 Users/Day — chuaikan.com
 
 > **Level:** World Class
 > **Steps:** 1041-1050
-> **เวลาโดยประมาณ:** 6 ชั่วโมง
-> **Prerequisites:** Part 091-104 (All World Class parts)
+> **เวลาโดยประมาณ:** 12 ชั่วโมง
+> **Prerequisites:** Part 100-104 (ทุก World Class parts), Part 006 (Docker), Part 007 (Cloudflare)
 
 ---
 
 ## 🎯 สิ่งที่จะได้เรียนรู้ใน Part นี้
 
-Part สุดท้ายของ Roadmap นี้จะพาเราดู "อนาคต" ของ Web Architecture ที่เราต้องเรียนรู้เพื่อเตรียมพร้อมสำหรับ 10M users/day ใน Part นี้เราจะ:
-
-- WebAssembly (WASM) สำหรับ High-Performance Frontend
-- Edge Computing ด้วย Cloudflare Workers
-- Vector Databases สำหรับ Semantic Search
-- GraphQL Federation
-- Engineering Culture ที่ Scale
-- chuaikan.com เป็น Reference Architecture
+- WebAssembly (WASM) สำหรับ compute-intensive frontend tasks
+- Cloudflare Workers AI: LLM at the edge
+- pgvector สำหรับ semantic search
+- GraphQL Federation ด้วย Apollo Router
+- Event-driven architecture maturity model
+- DORA metrics และ engineering culture
+- Architecture diagram สมบูรณ์: chuaikan.com ที่ 1M users/day
+- Preview: Road to 10M users/day
 
 ---
 
 ## 📖 ทฤษฎีและแนวคิด
 
-### 1. WebAssembly (WASM)
-
-WASM คือ binary instruction format ที่รันบน Browser ได้เร็วเกือบเท่า native code
+### Final Architecture Overview
 
 ```
-JavaScript Performance:
-- Dynamic typing = ต้อง JIT compile ทุกครั้ง
-- Garbage collection pauses
-- Single threaded (Web Workers ช่วยได้)
-
-WASM Performance:
-- Compiled ahead of time
-- Predictable performance
-- Near-native speed (ช้ากว่า native ~10-30% เท่านั้น)
-- รัน code ที่เขียน C++, Rust, Go ใน Browser!
+                    chuaikan.com at 1M Users/Day
+                    
+Users (Thailand)
+    ↓ HTTPS
+Cloudflare (CDN + WAF + Workers AI)
+    ↓
+Nginx Load Balancer (multiple)
+    ↓
+Next.js App Servers (Node.js 22, auto-scaled)
+    ↓ ↓ ↓ ↓
+    PostgreSQL 17 (primary + replicas)
+    Redis 7 (cluster mode)
+    Kafka 3.7 (KRaft, 3-broker cluster)
+    ClickHouse (analytics)
+    ↓
+Background Workers (BullMQ)
+    - Feed Algorithm
+    - Push Notifications (FCM)
+    - NLP Processing (Python FastAPI)
+    ↓
+External Services
+    - Cloudflare R2 (media storage)
+    - Cloudflare Stream (video)
+    - Firebase Cloud Messaging (push)
 ```
 
-**Use Cases ใน chuaikan.com:**
-```
-1. Image compression ก่อน upload:
-   JavaScript squoosh → WASM squoosh: 5x faster
+---
 
-2. Map rendering สำหรับ SOS heatmap:
-   Deck.gl ใช้ WASM สำหรับ GPU compute
+## ⚙️ Environment Setup
 
-3. Thai text processing ใน frontend:
-   PyThaiNLP → compile เป็น WASM → รันใน browser โดยไม่ต้อง API call
+### Step 1041: WASM Setup
 
-4. PDF generation:
-   jsPDF → PDFium (WASM) สำหรับ report ที่ซับซ้อน
-```
-
-### 2. Edge Computing Evolution
-
-```
-Traditional:
-User → CDN (cache static) → Origin Server (compute)
-
-Edge Computing:
-User → Edge Node (compute HERE)
-       ↓
-       Logic runs near user!
-       - API responses
-       - Auth verification
-       - A/B testing
-       - Personalization
-
-Benefits:
-- Latency: 200ms → 20ms (10x faster)
-- Cost: ลด origin server load
-- Scale: Cloudflare มี 300+ PoPs ทั่วโลก
+```bash
+# ติดตั้ง @ffmpeg/ffmpeg สำหรับ client-side processing
+npm install @ffmpeg/ffmpeg@0.12.x @ffmpeg/util@0.12.x
 ```
 
 ---
 
 ## 🛠️ Step-by-Step Implementation
 
-### Step 1041: WebAssembly สำหรับ Image Processing
+### Step 1041: WebAssembly - Image Compression ใน Browser
 
-```rust
-// image-processor.rs
-// เขียนด้วย Rust แล้ว compile เป็น WASM
+```typescript
+// src/lib/wasm/image-compressor.ts
+'use client';
 
-use wasm_bindgen::prelude::*;
-use image::{DynamicImage, ImageFormat};
+import { FFmpeg } from '@ffmpeg/ffmpeg';
+import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
-#[wasm_bindgen]
-pub fn compress_image(image_data: &[u8], quality: u8, max_width: u32) -> Vec<u8> {
-    // Decode image
-    let img = image::load_from_memory(image_data)
-        .expect("Failed to decode image");
-    
-    // Resize ถ้าใหญ่เกินไป
-    let img = if img.width() > max_width {
-        img.resize(max_width, img.height() * max_width / img.width(), 
-                   image::imageops::FilterType::Lanczos3)
-    } else {
-        img
-    };
-    
-    // Compress เป็น JPEG
-    let mut output = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality);
-    img.write_with_encoder(encoder).expect("Failed to encode");
-    
-    output
+let ffmpeg: FFmpeg | null = null;
+let isLoaded = false;
+
+async function loadFFmpeg(): Promise<FFmpeg> {
+  if (ffmpeg && isLoaded) return ffmpeg;
+
+  ffmpeg = new FFmpeg();
+
+  // Load WASM จาก CDN
+  const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.x/dist/umd';
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+  });
+
+  isLoaded = true;
+  return ffmpeg;
+}
+
+export async function compressImage(file: File, maxSizeKB = 500): Promise<Blob> {
+  const ff = await loadFFmpeg();
+
+  const inputName = `input.${file.name.split('.').pop()}`;
+  const outputName = 'output.jpg';
+
+  // เขียนไฟล์เข้า WASM filesystem
+  await ff.writeFile(inputName, await fetchFile(file));
+
+  // Compress image ใน browser ไม่ต้องส่งไป server
+  await ff.exec([
+    '-i', inputName,
+    '-vf', 'scale=iw*min(1\\,1920/iw):-1',  // max 1920px width
+    '-q:v', '85',                              // JPEG quality
+    '-f', 'image2',
+    outputName,
+  ]);
+
+  const data = await ff.readFile(outputName);
+  const blob = new Blob([data], { type: 'image/jpeg' });
+
+  // ถ้ายังใหญ่เกินไป compress ต่อ
+  if (blob.size > maxSizeKB * 1024) {
+    await ff.exec(['-i', outputName, '-q:v', '70', 'output2.jpg']);
+    const data2 = await ff.readFile('output2.jpg');
+    return new Blob([data2], { type: 'image/jpeg' });
+  }
+
+  return blob;
+}
+
+// Video thumbnail generation ใน browser
+export async function generateVideoThumbnail(videoFile: File): Promise<Blob> {
+  const ff = await loadFFmpeg();
+
+  await ff.writeFile('video.mp4', await fetchFile(videoFile));
+
+  // Extract frame ที่ 1 วินาที
+  await ff.exec([
+    '-i', 'video.mp4',
+    '-ss', '00:00:01.000',
+    '-vframes', '1',
+    '-vf', 'scale=640:-1',
+    'thumbnail.jpg',
+  ]);
+
+  const data = await ff.readFile('thumbnail.jpg');
+  return new Blob([data], { type: 'image/jpeg' });
 }
 ```
 
-```bash
-# Build WASM
-wasm-pack build --target web --out-dir pkg
-
-# Output:
-# pkg/
-#   image_processor_bg.wasm  (binary)
-#   image_processor.js        (JS glue code)
-#   image_processor.d.ts      (TypeScript types)
-```
+### Step 1042: Cloudflare Workers AI
 
 ```javascript
-// image-upload.js — ใช้ WASM ใน browser
-import init, { compress_image } from './pkg/image_processor.js';
-
-async function uploadWithCompression(file) {
-  // Initialize WASM module
-  await init();
-  
-  // Read file as ArrayBuffer
-  const arrayBuffer = await file.arrayBuffer();
-  const imageData = new Uint8Array(arrayBuffer);
-  
-  // Compress ด้วย WASM (เร็วกว่า JS 5x)
-  const compressed = compress_image(
-    imageData,
-    85,   // quality 85%
-    1920  // max width 1920px
-  );
-  
-  console.log(`Original: ${imageData.length} bytes → Compressed: ${compressed.length} bytes`);
-  console.log(`Saved ${((1 - compressed.length/imageData.length) * 100).toFixed(0)}%`);
-  
-  // Upload compressed image
-  const formData = new FormData();
-  formData.append('image', new Blob([compressed], { type: 'image/jpeg' }));
-  
-  return fetch('/api/upload', { method: 'POST', body: formData });
-}
-```
-
-### Step 1042: Cloudflare Workers สำหรับ Edge Computing
-
-```javascript
-// cloudflare-worker.js
-// Deploy ที่ Cloudflare Edge (300+ locations)
+// cloudflare-workers/content-moderation.js
+// Deploy: wrangler deploy
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    
-    // 1. Rate Limiting ที่ Edge
-    const rateLimitResult = await rateLimit(request, env);
-    if (rateLimitResult.blocked) {
-      return new Response('Too Many Requests', { status: 429 });
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
     }
-    
-    // 2. Auth Verification ที่ Edge (ไม่ต้องไปถึง origin!)
-    const token = request.headers.get('Authorization')?.replace('Bearer ', '');
-    if (token) {
-      const user = await verifyJWT(token, env.JWT_SECRET);
-      if (!user) {
-        return new Response('Unauthorized', { status: 401 });
-      }
-      // Attach user info ไป origin
-      request = new Request(request, {
-        headers: { ...Object.fromEntries(request.headers), 'X-User-Id': user.id }
-      });
+
+    const { text, context } = await request.json();
+
+    // ใช้ Llama 3.1 สำหรับ content moderation ที่ edge
+    const ai = new Ai(env.AI);
+
+    const result = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
+      messages: [
+        {
+          role: 'system',
+          content: `You are a content moderation AI for a Thai emergency response platform.
+Analyze the following content and respond in JSON format only:
+{"is_sos": boolean, "is_spam": boolean, "severity": "low|medium|high|critical", "category": "flood|fire|accident|other|normal", "confidence": 0.0-1.0}`,
+        },
+        {
+          role: 'user',
+          content: `Content to analyze: "${text}"`,
+        },
+      ],
+      max_tokens: 100,
+      temperature: 0.1,
+    });
+
+    let parsed;
+    try {
+      parsed = JSON.parse(result.response);
+    } catch {
+      parsed = { is_sos: false, is_spam: false, severity: 'low', category: 'normal', confidence: 0.5 };
     }
-    
-    // 3. Cache static API responses ที่ Edge
-    if (url.pathname === '/api/v1/regions' || url.pathname === '/api/v1/config') {
-      const cached = await caches.default.match(request);
-      if (cached) return cached;
-      
-      const response = await fetch(request);
-      ctx.waitUntil(
-        caches.default.put(request, response.clone())
-      );
-      return response;
-    }
-    
-    // 4. A/B Testing ที่ Edge
-    if (url.pathname === '/') {
-      const variant = getABVariant(request);
-      return serveVariant(request, variant, env);
-    }
-    
-    // 5. Forward อื่นๆ ไป Origin
-    return fetch(request);
-  }
+
+    return new Response(JSON.stringify(parsed), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
 };
+```
 
-async function rateLimit(request, env) {
-  const ip = request.headers.get('CF-Connecting-IP');
-  const key = `ratelimit:${ip}`;
-  
-  // Cloudflare KV สำหรับ distributed rate limiting
-  const count = parseInt(await env.KV.get(key) || '0');
-  
-  if (count >= 100) {  // 100 requests per minute
-    return { blocked: true };
+```typescript
+// src/lib/cloudflare/workers-ai-client.ts
+export async function moderateContent(text: string): Promise<{
+  is_sos: boolean;
+  is_spam: boolean;
+  severity: string;
+  category: string;
+  confidence: number;
+}> {
+  const response = await fetch(
+    `https://content-moderation.chuaikan.workers.dev`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }
+  );
+
+  return response.json();
+}
+```
+
+### Step 1043: pgvector สำหรับ Semantic Search
+
+```sql
+-- Enable pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- เพิ่ม embedding column ใน posts table
+ALTER TABLE posts ADD COLUMN embedding vector(384);
+
+-- สร้าง index สำหรับ fast similarity search
+CREATE INDEX ON posts USING ivfflat (embedding vector_cosine_ops)
+  WITH (lists = 100);
+
+-- HNSW index (เร็วกว่า IVFFlat แต่ใช้ memory มากกว่า)
+CREATE INDEX ON posts USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+```
+
+```typescript
+// src/lib/search/vector-search.ts
+import { db } from '../db/postgres';
+import { getTextEmbedding } from '../nlp/thai-nlp-client';
+
+export async function findSimilarSOSPosts(query: string, limit = 10): Promise<any[]> {
+  // แปลง query เป็น embedding
+  const embedding = await getTextEmbedding(query);
+
+  // Vector similarity search
+  const result = await db.query(
+    `SELECT
+        p.id, p.content, p.created_at,
+        u.username,
+        p.sos_category, p.sos_severity,
+        1 - (p.embedding <=> $1::vector) as similarity
+     FROM posts p
+     JOIN users u ON u.id = p.user_id
+     WHERE p.is_sos = true
+       AND p.embedding IS NOT NULL
+       AND 1 - (p.embedding <=> $1::vector) > 0.7  -- threshold
+     ORDER BY p.embedding <=> $1::vector
+     LIMIT $2`,
+    [JSON.stringify(embedding), limit]
+  );
+
+  return result.rows;
+}
+
+// ตัวอย่าง: หา SOS posts คล้ายกัน
+// const similar = await findSimilarSOSPosts("น้ำท่วมขัง ถนนปิด")
+// จะหา posts ที่พูดถึง floods, flooded roads, etc.
+```
+
+### Step 1044: GraphQL Federation ด้วย Apollo Router
+
+```yaml
+# apollo-router/router.yaml
+supergraph:
+  listen: 0.0.0.0:4000
+  path: /graphql
+
+# Subgraphs (microservices)
+subgraphs:
+  users:
+    routing_url: http://localhost:4001/graphql
+    schema:
+      file: ./schemas/users.graphql
+  posts:
+    routing_url: http://localhost:4002/graphql
+    schema:
+      file: ./schemas/posts.graphql
+  sos:
+    routing_url: http://localhost:4003/graphql
+    schema:
+      file: ./schemas/sos.graphql
+  notifications:
+    routing_url: http://localhost:4004/graphql
+    schema:
+      file: ./schemas/notifications.graphql
+
+# Performance
+traffic_shaping:
+  all:
+    deduplicate_query: true
+
+# Caching
+apq:
+  enabled: true
+  storage:
+    in_memory:
+      limit: 512
+```
+
+```typescript
+// src/graphql/subgraphs/sos/schema.ts
+import { buildSubgraphSchema } from '@apollo/subgraph';
+import { gql } from 'graphql-tag';
+
+const typeDefs = gql`
+  extend schema @link(url: "https://specs.apollo.dev/federation/v2.0", import: ["@key"])
+
+  type SOSPost @key(fields: "id") {
+    id: ID!
+    content: String!
+    alertType: String!
+    severity: String!
+    location: Location!
+    status: String!
+    responders: [User!]!
+    createdAt: String!
   }
-  
-  await env.KV.put(key, String(count + 1), { expirationTtl: 60 });
-  return { blocked: false };
-}
 
-function getABVariant(request) {
-  const cookie = request.headers.get('Cookie') || '';
-  const match = cookie.match(/ab_variant=([^;]+)/);
-  
-  if (match) return match[1];
-  
-  // New user: assign variant
-  const ip = request.headers.get('CF-Connecting-IP');
-  const hash = simpleHash(ip);
-  return hash % 2 === 0 ? 'control' : 'treatment';
-}
-```
+  type Location {
+    lat: Float!
+    lng: Float!
+    province: String!
+    address: String
+  }
 
-```bash
-# Deploy ไป Cloudflare
-wrangler deploy cloudflare-worker.js \
-  --name chuaikan-edge \
-  --routes "chuaikan.com/*"
-```
+  type Query {
+    activeSOS(province: String, severity: String): [SOSPost!]!
+    sosById(id: ID!): SOSPost
+  }
 
-### Step 1043: Vector Database สำหรับ Semantic Search
+  type Mutation {
+    createSOS(input: CreateSOSInput!): SOSPost!
+    updateSOSStatus(id: ID!, status: String!): SOSPost!
+  }
 
-```python
-# semantic-search.py
-# ใช้ pgvector extension ใน PostgreSQL
+  input CreateSOSInput {
+    content: String!
+    alertType: String!
+    location: LocationInput!
+  }
 
-# ติดตั้ง pgvector
-# SQL:
-# CREATE EXTENSION IF NOT EXISTS vector;
-
-from sqlalchemy import create_engine, text
-from sentence_transformers import SentenceTransformer
-import numpy as np
-
-# ใช้ multilingual model ที่รองรับภาษาไทย
-encoder = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-
-def create_vector_schema(engine):
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE EXTENSION IF NOT EXISTS vector;
-            
-            ALTER TABLE sos_alerts 
-            ADD COLUMN IF NOT EXISTS description_embedding vector(384);
-            
-            CREATE INDEX IF NOT EXISTS sos_description_embedding_idx 
-            ON sos_alerts 
-            USING ivfflat (description_embedding vector_cosine_ops)
-            WITH (lists = 100);
-        """))
-
-def index_sos_description(sos_id, description, engine):
-    """สร้าง embedding สำหรับ SOS description"""
-    embedding = encoder.encode(description).tolist()
-    
-    with engine.connect() as conn:
-        conn.execute(
-            text("UPDATE sos_alerts SET description_embedding = :emb WHERE id = :id"),
-            {'emb': embedding, 'id': sos_id}
-        )
-
-def semantic_search_sos(query_text, engine, limit=10, similarity_threshold=0.7):
-    """ค้นหา SOS alerts ที่คล้ายกับ query ด้วย semantic similarity"""
-    
-    query_embedding = encoder.encode(query_text).tolist()
-    
-    with engine.connect() as conn:
-        results = conn.execute(
-            text("""
-                SELECT 
-                    id,
-                    description,
-                    severity,
-                    ST_AsText(location) as location,
-                    created_at,
-                    1 - (description_embedding <=> :query_embedding::vector) AS similarity
-                FROM sos_alerts
-                WHERE 1 - (description_embedding <=> :query_embedding::vector) > :threshold
-                  AND status = 'active'
-                ORDER BY similarity DESC
-                LIMIT :limit
-            """),
-            {
-                'query_embedding': str(query_embedding),
-                'threshold': similarity_threshold,
-                'limit': limit
-            }
-        ).fetchall()
-    
-    return [dict(row._mapping) for row in results]
-
-# ตัวอย่าง
-results = semantic_search_sos("คนติดอยู่บนหลังคาเพราะน้ำท่วม")
-# จะหา SOS อื่นที่คล้ายกัน เช่น "ติดอยู่ในบ้าน น้ำสูง", "ขอความช่วยเหลือ น้ำท่วม"
-# แม้จะใช้คำต่างกัน!
-```
-
-### Step 1044: GraphQL Federation
-
-```javascript
-// federation-gateway.js
-// รวม multiple GraphQL schemas เป็น API เดียว
-
-const { ApolloServer } = require('@apollo/server');
-const { ApolloGateway, IntrospectAndCompose } = require('@apollo/gateway');
-
-const gateway = new ApolloGateway({
-  supergraphSdl: new IntrospectAndCompose({
-    subgraphs: [
-      { name: 'users', url: 'http://user-service/graphql' },
-      { name: 'feed', url: 'http://feed-service/graphql' },
-      { name: 'sos', url: 'http://sos-service/graphql' },
-      { name: 'notifications', url: 'http://notification-service/graphql' },
-    ],
-  }),
-});
-
-const server = new ApolloServer({ gateway });
-
-// Query ที่ Client ส่งมา:
-const QUERY = `
-  query GetUserFeedWithSOS($userId: ID!) {
-    user(id: $userId) {        # from: user-service
-      username
-      avatar
-      location {
-        lat
-        lng
-      }
-    }
-    
-    feed(userId: $userId) {    # from: feed-service
-      posts {
-        id
-        content
-        author {               # federated: user-service
-          username
-        }
-        sos {                  # federated: sos-service (ถ้า post มี SOS)
-          severity
-          status
-        }
-      }
-    }
-    
-    nearbySOS(               # from: sos-service
-      lat: 13.7, lng: 100.5,
-      radiusKm: 10
-    ) {
-      id
-      severity
-      description
-      reporter {             # federated: user-service
-        username
-      }
-    }
+  input LocationInput {
+    lat: Float!
+    lng: Float!
+    province: String!
   }
 `;
-// Gateway จะ route แต่ละ field ไปยัง service ที่ถูกต้องโดยอัตโนมัติ
 ```
 
 ### Step 1045: Event-Driven Architecture Maturity Model
 
-```
-Level 1 — Reactive (เราอยู่ตรงนี้ตอน Phase 1):
-  Direct HTTP calls between services
-  Synchronous, tightly coupled
+ระดับความสมบูรณ์ของ Event-Driven Architecture:
 
-Level 2 — Event Notification (Phase 2-3):
-  Events published to Kafka
-  Services react to events
-  Still need to call other services for data
+| ระดับ | ชื่อ | คำอธิบาย | chuaikan.com Status |
+|-------|------|-----------|---------------------|
+| 1 | **Basic Messaging** | ใช้ message queue อย่างง่าย | ✅ ผ่านแล้ว (Redis Queue) |
+| 2 | **Event Streaming** | Kafka, topics, consumer groups | ✅ ผ่านแล้ว (Part 072) |
+| 3 | **Event Sourcing** | เก็บ events เป็น source of truth | 🔄 กำลังทำ |
+| 4 | **CQRS** | แยก read/write models | 🔄 กำลังทำ |
+| 5 | **Reactive Systems** | ทุก service reactive, resilient | 🎯 เป้าหมาย |
 
-Level 3 — Event-Carried State Transfer (Phase 4):
-  Events carry ALL necessary data
-  Services don't need to call back
-  Eventually consistent, highly decoupled
+### Step 1046: DORA Metrics
 
-Level 4 — Event Sourcing (Advanced):
-  System state = sequence of events
-  Can replay history
-  Audit trail built-in
-  Complex but powerful
+```typescript
+// src/lib/metrics/dora-metrics.ts
+// DORA = DevOps Research and Assessment
 
-Level 5 — CQRS + Event Sourcing:
-  Read model separate from write model
-  Read models optimized for queries
-  Write model optimized for commands
-  chuaikan.com อาจต้องการ Level 5 สำหรับ SOS command center
-```
+export const DORA_TARGETS = {
+  // Deployment Frequency: "multiple per day" = Elite
+  deploymentFrequency: 'multiple_per_day',
 
-```javascript
-// event-sourcing-example.js
-// ตัวอย่าง Event Sourcing สำหรับ SOS lifecycle
+  // Lead Time: "< 1 hour" = Elite
+  leadTimeForChanges: 60, // minutes
 
-class SOSAggregate {
-  constructor(id) {
-    this.id = id;
-    this.status = 'created';
-    this.events = [];
-    this.version = 0;
-  }
-  
-  // Apply event ไป state
-  apply(event) {
-    switch (event.type) {
-      case 'SOSCreated':
-        this.status = 'active';
-        this.severity = event.data.severity;
-        this.location = event.data.location;
-        break;
-      
-      case 'SOSResponderAssigned':
-        this.responderId = event.data.responderId;
-        this.status = 'responding';
-        break;
-      
-      case 'SOSResolved':
-        this.status = 'resolved';
-        this.resolvedAt = event.data.timestamp;
-        break;
-    }
-    
-    this.version++;
-  }
-  
-  // Commands
-  create(data) {
-    this.raise({ type: 'SOSCreated', data });
-  }
-  
-  assignResponder(responderId) {
-    if (this.status !== 'active') throw new Error('Cannot assign to non-active SOS');
-    this.raise({ type: 'SOSResponderAssigned', data: { responderId } });
-  }
-  
-  resolve(notes) {
-    if (!this.responderId) throw new Error('Must have responder before resolving');
-    this.raise({ type: 'SOSResolved', data: { notes, timestamp: new Date() } });
-  }
-  
-  raise(event) {
-    this.events.push(event);
-    this.apply(event);
-  }
-  
-  // Reconstruct from event history
-  static fromHistory(id, events) {
-    const aggregate = new SOSAggregate(id);
-    events.forEach(e => aggregate.apply(e));
-    aggregate.events = [];  // Clear uncommitted events
-    return aggregate;
-  }
+  // Change Failure Rate: "< 5%" = Elite
+  changeFailureRate: 5, // percent
+
+  // MTTR: "< 30 minutes" = Elite
+  meanTimeToRestore: 30, // minutes
+};
+
+// Track deployment ด้วย GitHub Actions
+export async function recordDeployment(commitSha: string, environment: string) {
+  const now = new Date();
+
+  await db.query(
+    `INSERT INTO deployments (commit_sha, environment, deployed_at, deployed_by)
+     VALUES ($1, $2, $3, $4)`,
+    [commitSha, environment, now, process.env.DEPLOY_USER]
+  );
+
+  // Calculate lead time (commit time → deploy time)
+  const commitTime = await getCommitTime(commitSha);
+  const leadTimeMinutes = (now.getTime() - commitTime.getTime()) / 60000;
+
+  console.log(`[DORA] Deployment: ${commitSha} | Lead time: ${leadTimeMinutes.toFixed(0)} min`);
+}
+
+async function getCommitTime(sha: string): Promise<Date> {
+  // ดึงจาก GitHub API
+  const response = await fetch(
+    `https://api.github.com/repos/chuaikan/app/commits/${sha}`,
+    { headers: { Authorization: `token ${process.env.GITHUB_TOKEN}` } }
+  );
+  const data = await response.json();
+  return new Date(data.commit.author.date);
 }
 ```
 
+### Step 1047: Blameless Postmortem Template
+
+```markdown
+# Incident Postmortem: [Incident Title]
+
+**Date:** YYYY-MM-DD
+**Severity:** P1/P2/P3
+**Duration:** X hours Y minutes
+**Impact:** X% of users affected
+**Prepared by:** [Name]
+
+## Timeline (UTC+7)
+| Time | Event |
+|------|-------|
+| HH:MM | Incident started |
+| HH:MM | Alert triggered |
+| HH:MM | Engineer paged |
+| HH:MM | Mitigation applied |
+| HH:MM | Incident resolved |
+
+## Root Cause
+[ไม่โทษคน แต่โทษระบบ/process]
+
+## What Went Well
+- การ detect ปัญหาเร็ว
+- Team communication ดี
+
+## What Went Wrong
+- [ระบุปัญหาเชิงระบบ]
+
+## Action Items
+| Action | Owner | Due Date | Status |
+|--------|-------|----------|--------|
+| Add circuit breaker to X | Engineer A | 2024-XX-XX | TODO |
+| Improve alerting for Y | Engineer B | 2024-XX-XX | TODO |
+
+## 5 Whys
+1. Why? Service crashed → Because memory OOM
+2. Why OOM? → Because cache not configured with TTL
+3. Why no TTL? → Because code review missed it
+4. Why missed? → Because no automated check
+5. Root: ขาด automated memory leak detection
+```
+
+### Step 1048: Open Source Contributions
+
+```bash
+# Contributing to PyThaiNLP
+git clone https://github.com/PyThaiNLP/pythainlp
+cd pythainlp
+
+# เพิ่ม Thai SOS vocabulary
+# pythainlp/corpus/words/thai-sos-vocab.txt
+echo "น้ำท่วม
+ไฟไหม้
+อุบัติเหตุ
+ดินถล่ม
+วาตภัย
+แผ่นดินไหว
+ขอความช่วยเหลือ
+ฉุกเฉิน" >> pythainlp/corpus/words/thai-sos-vocab.txt
+
+# Run tests
+python -m pytest tests/
+
+# Submit PR พร้อม description เป็นภาษาอังกฤษ
+```
+
+### Step 1049: Final Architecture Diagram (ASCII)
+
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║           chuaikan.com — 1,000,000 Users/Day Architecture            ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+[Users/Devices] ──HTTPS──▶ [Cloudflare]
+                                │
+               ┌────────────────┼────────────────┐
+               ▼                ▼                ▼
+        [CDN Edge]    [Workers AI]     [DDoS/WAF]
+               │                │
+               └────────┬───────┘
+                        ▼
+              [Nginx Load Balancer]
+                        │
+         ┌──────────────┼──────────────┐
+         ▼              ▼              ▼
+    [Next.js 1]    [Next.js 2]    [Next.js N]
+    Node.js 22     Node.js 22     Node.js 22
+         │              │              │
+         └──────────────┼──────────────┘
+                        │
+    ┌───────────────────┼───────────────────┐
+    ▼                   ▼                   ▼
+[PostgreSQL 17]    [Redis 7]         [Kafka 3.7]
+Primary+Replicas   Cluster Mode      KRaft 3-broker
+    │                   │                   │
+    │              [BullMQ Workers]          │
+    │              Feed/Push/NLP             │
+    │                                        │
+    └──────────────────▼────────────────────┘
+                [ClickHouse]
+                Analytics DB
+                        │
+                [Grafana]
+                Dashboard + Alerts
+                        │
+                [Line/Discord]
+                Alerts
+
+EXTERNAL SERVICES:
+  Cloudflare R2 ──── Media Storage (images, videos)
+  Cloudflare Stream ─ Live Video Delivery  
+  Firebase FCM ────── Push Notifications (10M devices)
+  Python FastAPI ───── Thai NLP Service (port 8001)
+  mediamtx ──────────── RTMP/HLS Live Streaming
+```
+
+### Step 1050: Preview — Road to 10M Users/Day
+
+```typescript
+// สิ่งที่ต้องทำเพิ่มเพื่อ scale จาก 1M → 10M users/day
+
+const roadTo10M = {
+  database: {
+    current: 'PostgreSQL primary + 2 replicas',
+    next: 'CockroachDB / Vitess (horizontal sharding)',
+    when: '> 2M concurrent users',
+  },
+
+  cache: {
+    current: 'Redis Cluster (3 nodes)',
+    next: 'Redis Cluster (10+ nodes) + Regional caches',
+    when: '> 5M cache ops/sec',
+  },
+
+  kafka: {
+    current: '3-broker KRaft cluster',
+    next: '10+ broker cluster, cross-region replication',
+    when: '> 10M events/day',
+  },
+
+  infrastructure: {
+    current: 'Single datacenter (TH)',
+    next: 'Multi-region (TH + SG + HK), Kubernetes',
+    when: 'International expansion',
+  },
+
+  ai: {
+    current: 'Claude API + Workers AI',
+    next: 'Fine-tuned Thai LLM on-premise',
+    when: 'Cost optimization needed',
+  },
+
+  team: {
+    current: '5-10 engineers',
+    next: '20-50 engineers, platform team',
+    when: '> 100 services',
+  },
+};
+
+console.log('Next milestone: 10M Users/Day');
+console.log('Key investments:', Object.keys(roadTo10M));
+```
+
 ---
 
-## 🔧 Platform Engineering Roadmap
+## 🔧 Configuration Files
 
-```
-chuaikan.com Platform Roadmap 2025-2026:
+### Wrangler.toml สำหรับ Cloudflare Workers
 
-Q1 2025: Developer Experience
-- Backstage: Software Catalog complete
-- Self-service: New service in 5 minutes
-- DORA metrics dashboard live
-- Golden Path documentation
+```toml
+# cloudflare-workers/wrangler.toml
+name = "chuaikan-content-moderation"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+account_id = "your_cloudflare_account_id"
 
-Q2 2025: Reliability Engineering
-- SLO dashboard: All Tier 1 services
-- Chaos Engineering program
-- DR drill quarterly
-- Error budget policy enforced
+[ai]
+binding = "AI"
 
-Q3 2025: Intelligence Layer
-- ML feed ranking (A/B test)
-- CV flood detection live
-- Thai NLP for SOS categorization
-- Real-time analytics dashboard
-
-Q4 2025: Edge & Performance
-- Cloudflare Workers deployed
-- WASM image compression
-- GraphQL Federation gateway
-- Vector search for SOS
-
-Q1 2026: Scale to 10M Users
-- Multi-region active-active (3 regions)
-- AI-powered SOS routing
-- Platform as a product (external teams)
+[[routes]]
+pattern = "content-moderation.chuaikan.workers.dev"
+zone_name = "chuaikan.workers.dev"
 ```
 
----
+### pgvector Index สำหรับ Production
 
-## 🌟 Engineering Culture ที่ Scale
+```sql
+-- สร้าง HNSW index (ดีกว่า IVFFlat สำหรับ recall)
+CREATE INDEX CONCURRENTLY posts_embedding_hnsw_idx
+ON posts USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 200);
 
-### Principles ของ chuaikan.com Engineering Team
+-- ตรวจสอบ index
+SELECT schemaname, tablename, indexname, indexdef
+FROM pg_indexes
+WHERE tablename = 'posts' AND indexname LIKE '%embedding%';
 
-```
-1. "Ship Early, Learn Fast"
-   - ไม่รอ perfect feature → release → learn from users
-   - Feature flags ช่วย → ship to 1% ก่อน
-
-2. "Blameless Culture"
-   - ไม่ blame คน → blame process
-   - Every incident = learning opportunity
-   - Postmortems เปิดเผยต่อทั้งทีม
-
-3. "Documentation is Code"
-   - ADR สำหรับทุก big decision
-   - Runbook อัพเดทหลังทุก incident
-   - TechDocs ใน Backstage
-
-4. "Measure Everything"
-   - ถ้าวัดไม่ได้ = ไม่รู้ว่าดีขึ้นหรือเปล่า
-   - SLOs สำหรับ reliability
-   - DORA metrics สำหรับ velocity
-   - Unit economics สำหรับ cost
-
-5. "Automate the Toil"
-   - งาน manual ที่ทำซ้ำ = automateทันที
-   - SRE target: toil < 50% ของเวลา
-```
-
-### Contributing to Open Source
-
-```
-chuaikan.com ใช้ Open Source อย่างไร:
-- PostgreSQL, Redis, Kafka: Core infrastructure
-- Kubernetes, ArgoCD: Deployment
-- Prometheus, Grafana, Jaeger: Observability
-- PyThaiNLP: Thai NLP
-
-การ Give Back:
-- Bug reports และ PRs ไป PyThaiNLP
-- Thai flood detection dataset บน Roboflow
-- Blog posts เกี่ยวกับ Thai NLP lessons learned
-- Open source ส่วน infrastructure configs ที่ไม่ sensitive
-
-เหตุผล:
-- สร้าง brand เพื่อ recruit
-- Community ช่วย improve ของที่เราใช้
-- "We stand on the shoulders of giants"
+-- Query performance
+EXPLAIN ANALYZE
+SELECT id, 1 - (embedding <=> '[0.1, 0.2, ...]'::vector) as similarity
+FROM posts
+ORDER BY embedding <=> '[0.1, 0.2, ...]'::vector
+LIMIT 10;
 ```
 
 ---
 
-## 🏆 chuaikan.com เป็น Reference Architecture
+## 🧪 Testing
 
-หลังจาก Journey ทั้งหมด chuaikan.com ได้กลายเป็น Reference Architecture สำหรับ:
+### Test WASM Image Compression
 
-### Final Architecture Summary
+```typescript
+// tests/wasm/image-compression.test.ts
+import { compressImage } from '../../src/lib/wasm/image-compressor';
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│              chuaikan.com — 1,000,000 Users/Day                    │
-│                    Reference Architecture                           │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │                    Client Layer                               │  │
-│  │  iOS App  │  Android App  │  Progressive Web App             │  │
-│  │  WASM Image Processing  │  Offline Support (Service Worker)  │  │
-│  └──────────────────────────┬───────────────────────────────────┘  │
-│                              │                                      │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │              Edge Layer (Cloudflare Workers)                  │  │
-│  │  Rate Limiting  │  Auth  │  A/B Testing  │  Cache Routing    │  │
-│  └──────────────────────────┬───────────────────────────────────┘  │
-│                              │                                      │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │              API Gateway Layer                               │  │
-│  │  GraphQL Federation  │  REST Proxy  │  WebSocket             │  │
-│  └──────────────────────────┬───────────────────────────────────┘  │
-│                              │                                      │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │              Microservices Layer (Kubernetes)                 │  │
-│  │  Feed  │  SOS  │  User/Auth  │  Notification  │  Search      │  │
-│  │  NLP   │  CV   │  Analytics  │  ML Inference  │  Media       │  │
-│  └──────────────────────────┬───────────────────────────────────┘  │
-│                              │                                      │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │              Data Layer                                       │  │
-│  │  PostgreSQL (Sharded)  │  Redis Cluster  │  ClickHouse        │  │
-│  │  Elasticsearch         │  Kafka          │  pgvector          │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │              Platform Layer                                   │  │
-│  │  Backstage IDP  │  ArgoCD  │  Prometheus/Grafana  │  Jaeger   │  │
-│  │  Terraform      │  Vault   │  MLflow              │  WAL-G    │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+test('should compress large image', async () => {
+  // สร้าง test image
+  const response = await fetch('https://picsum.photos/3840/2160');
+  const blob = await response.blob();
+  const file = new File([blob], 'test.jpg', { type: 'image/jpeg' });
+
+  console.log(`Original size: ${(file.size / 1024).toFixed(0)}KB`);
+
+  const compressed = await compressImage(file, 500);
+
+  console.log(`Compressed size: ${(compressed.size / 1024).toFixed(0)}KB`);
+  expect(compressed.size).toBeLessThan(500 * 1024);
+}, 30000); // 30s timeout สำหรับ WASM loading
 ```
 
 ---
 
-## ✅ Checklist — Part 105 และ Road to 1M Complete!
+## ❌ Common Errors & Solutions
 
-### Technical Checklist
+### Error 1: WASM Loading ช้า (> 5 วินาที)
 
-- [ ] WASM image compression ทดสอบแล้ว (5x faster than JS)
-- [ ] Cloudflare Workers deployed (latency ลดลง > 50%)
-- [ ] Vector search (pgvector) สำหรับ semantic SOS search
-- [ ] GraphQL Federation รวม 4 services แล้ว
-- [ ] Event-Driven Architecture Level 3 (Event-Carried State)
+**แก้ไข:** Preload WASM ตอน app startup
+```typescript
+// ใน layout.tsx
+useEffect(() => {
+  loadFFmpeg(); // load in background
+}, []);
+```
 
-### Organizational Checklist
+### Error 2: pgvector Index Build ช้า
 
-- [ ] Engineering Principles เขียนและ team buy-in
-- [ ] Blameless culture: postmortem > 90% completed within 48h
-- [ ] Open source contributions: ≥ 1 PR/quarter
-- [ ] DORA metrics: Elite or High tier
-- [ ] Platform Engineering team established
+**แก้ไข:**
+```sql
+-- Build index ด้วย more workers
+SET max_parallel_maintenance_workers = 4;
+CREATE INDEX CONCURRENTLY ...;
+```
 
-### Road to 1M Users/Day — Completion
+### Error 3: Apollo Router GraphQL N+1
 
-- [ ] Part 091: Architecture ที่รองรับ 100M users ✅
-- [ ] Part 092: Distributed Systems Fundamentals ✅
-- [ ] Part 093: Consensus Algorithms ✅
-- [ ] Part 094: Distributed Tracing ด้วย Jaeger ✅
-- [ ] Part 095: Cost Optimization at Scale ✅
-- [ ] Part 096: FinOps — Cloud Cost Management ✅
-- [ ] Part 097: Platform Engineering (IDP) ✅
-- [ ] Part 098: SRE (Site Reliability Engineering) ✅
-- [ ] Part 099: Disaster Recovery & Business Continuity ✅
-- [ ] Part 100: Case Study — 0 ถึง 1M users/day ✅
-- [ ] Part 101: AI/ML Integration ✅
-- [ ] Part 102: Computer Vision สำหรับ Flood Detection ✅
-- [ ] Part 103: NLP สำหรับ Thai Language ✅
-- [ ] Part 104: Real-time Analytics Dashboard ✅
-- [ ] Part 105: Advanced Topics & Future Roadmap ✅
+**แก้ไข:** ใช้ DataLoader ใน resolvers
+```typescript
+import DataLoader from 'dataloader';
 
-**chuaikan.com — From 0 to 1,000,000 Users/Day: MISSION ACCOMPLISHED!**
+const userLoader = new DataLoader(async (ids: string[]) => {
+  const users = await db.query('SELECT * FROM users WHERE id = ANY($1)', [ids]);
+  return ids.map((id) => users.rows.find((u: any) => u.id === id));
+});
+```
+
+---
+
+## ✅ Checklist
+
+- [ ] **Step 1041:** WASM image compression ทำงานใน browser, < 500KB output
+- [ ] **Step 1042:** Cloudflare Workers AI deploy สำเร็จ, moderation ทำงาน
+- [ ] **Step 1043:** pgvector extension enable, HNSW index สร้างแล้ว
+- [ ] **Step 1044:** Apollo Router รัน GraphQL Federation ได้
+- [ ] **Step 1045:** Event-driven maturity model ประเมินตำแหน่งปัจจุบัน
+- [ ] **Step 1046:** DORA metrics tracking ทำงาน (deployment frequency, lead time)
+- [ ] **Step 1047:** Postmortem template ใช้หลังทุก P1/P2 incident
+- [ ] **Step 1048:** Open source contribution plan เตรียมไว้
+- [ ] **Step 1049:** Architecture diagram อัพเดทสมบูรณ์
+- [ ] **Step 1050:** Road to 10M users/day technical plan เสร็จ
 
 ---
 
 ## 🔗 References
 
 - [WebAssembly.org](https://webassembly.org/)
-- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
-- [pgvector — Vector Extension for PostgreSQL](https://github.com/pgvector/pgvector)
+- [FFmpeg.wasm](https://ffmpegwasm.netlify.app/)
+- [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/)
+- [pgvector GitHub](https://github.com/pgvector/pgvector)
 - [Apollo Federation](https://www.apollographql.com/docs/federation/)
-- [Event Sourcing — Martin Fowler](https://martinfowler.com/eaaDev/EventSourcing.html)
-- [Team Topologies](https://teamtopologies.com/)
-- [The Platform Engineering Guide](https://platformengineering.org/)
+- [DORA Metrics](https://dora.dev/guides/dora-metrics-four-keys/)
+- [Google SRE Book — Postmortems](https://sre.google/sre-book/postmortem-culture/)
 
 ---
-
 *Part 105 | Road to 1,000,000 Users/Day | chuaikan.com*
-
----
-
-> **"การเดินทางจาก 0 ถึง 1,000,000 users/day ไม่ใช่เรื่องของ technology เพียงอย่างเดียว แต่คือการสร้าง team, culture, และ system ที่เติบโตไปด้วยกัน"**
->
-> — chuaikan.com Engineering Team

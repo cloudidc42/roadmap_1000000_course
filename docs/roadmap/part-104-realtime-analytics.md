@@ -1,619 +1,614 @@
 # Part 104: Real-time Analytics Dashboard
-
 ## Road to 1,000,000 Users/Day — chuaikan.com
 
 > **Level:** World Class
 > **Steps:** 1031-1040
-> **เวลาโดยประมาณ:** 5 ชั่วโมง
-> **Prerequisites:** Part 092 (Distributed Systems), Part 094 (Distributed Tracing)
+> **เวลาโดยประมาณ:** 10 ชั่วโมง
+> **Prerequisites:** Part 072 (Kafka), Part 009 (Monitoring), Part 004 (PostgreSQL), Part 005 (Redis)
 
 ---
 
 ## 🎯 สิ่งที่จะได้เรียนรู้ใน Part นี้
 
-Real-time Analytics คือ "ดวงตา" ของ chuaikan.com ที่ช่วยให้เห็นสิ่งที่เกิดขึ้น ณ ปัจจุบัน ใน Part นี้เราจะ:
-
-- ติดตั้ง ClickHouse สำหรับ OLAP Queries ที่เร็วมาก
-- สร้าง Kafka → ClickHouse Streaming Pipeline
-- สร้าง Grafana Dashboard แบบ Real-time
-- ระบบ Alert สำหรับ User Spike และ SOS Cluster
-- Dashboard สำหรับ Emergency Responders
+- ClickHouse: OLAP database สำหรับ analytics
+- Materialized views สำหรับ sub-second aggregations
+- Kafka → ClickHouse streaming pipeline
+- Grafana dashboard สำหรับ operations
+- SOS command center สำหรับ emergency responders
+- Real-time anomaly detection
+- Grafana alerting ไปยัง Line Notify และ Discord
 
 ---
 
 ## 📖 ทฤษฎีและแนวคิด
 
-### 1. OLTP vs OLAP
+### ทำไมต้องใช้ ClickHouse?
+
+| Database | Query 1B rows | Write Speed | คำอธิบาย |
+|----------|--------------|-------------|-----------|
+| PostgreSQL | ~60 seconds | 100K rows/s | OLTP, ไม่เหมาะกับ analytics |
+| ClickHouse | ~0.1 seconds | 1M rows/s | OLAP, เหมาะมากสำหรับ analytics |
+| Redis | N/A | 1M ops/s | Cache, ไม่ใช่ database |
+
+### Architecture
 
 ```
-OLTP (Online Transaction Processing):
-- PostgreSQL ที่เราใช้อยู่
-- Optimized สำหรับ row-level operations (INSERT, UPDATE, SELECT by PK)
-- ดีสำหรับ: บันทึก SOS, อัพเดท user profile
-- ไม่ดีสำหรับ: "แสดง SOS ทั้งหมดใน 1 ชั่วโมงที่ผ่านมาแยกตาม region"
-
-OLAP (Online Analytical Processing):
-- ClickHouse ที่เราจะติดตั้ง
-- Optimized สำหรับ aggregation queries บน columns
-- ดีสำหรับ: Analytics, Dashboards, Reports
-- Query ที่ใช้เวลาหลายนาทีบน PostgreSQL → หลายมิลลิวินาทีบน ClickHouse
-```
-
-### 2. ClickHouse ทำงานอย่างไร
-
-```
-ClickHouse เก็บข้อมูลแบบ Columnar:
-
-PostgreSQL (Row Storage):
-Row 1: [user_id=1, event=login, time=10:00, region=Bangkok]
-Row 2: [user_id=2, event=post,  time=10:01, region=Chiang Mai]
-Row 3: [user_id=3, event=sos,   time=10:02, region=Bangkok]
-
-ClickHouse (Column Storage):
-user_id:  [1, 2, 3, ...]
-event:    [login, post, sos, ...]
-time:     [10:00, 10:01, 10:02, ...]
-region:   [Bangkok, Chiang Mai, Bangkok, ...]
-
-เมื่อ query: SELECT COUNT(*) WHERE region='Bangkok' AND event='sos'
-→ ClickHouse อ่านแค่ 2 columns (region, event) ไม่ต้องอ่าน user_id, time
-→ เร็วกว่ามาก!
-```
-
-### 3. Kafka → ClickHouse Architecture
-
-```
-Events Flow:
-
-App Services → Kafka Topics → ClickHouse (via Kafka Engine)
-                                    ↓
-                              Grafana Dashboards
-                                    ↓  
-                            Emergency Responders
+App Events (Node.js)
+    ↓ Kafka (analytics-events topic)
+    ↓ Kafka Table Engine
+ClickHouse (analytics DB)
+    ↓ Materialized Views
+    ↓ HTTP API
+Grafana Dashboards ← Query ClickHouse
+    ↓ Alert rules
+Line Notify / Discord
 ```
 
 ---
 
 ## ⚙️ Environment Setup
 
-### ติดตั้ง ClickHouse บน Kubernetes
+### Step 1031: ติดตั้ง ClickHouse
 
 ```bash
-# เพิ่ม Helm repo
-helm repo add clickhouse-operator https://docs.altinity.com/clickhouse-operator/
-helm repo update
+# ติดตั้ง ClickHouse บน Ubuntu 24.04
+sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | sudo gpg --dearmour -o /usr/share/keyrings/clickhouse-keyring.gpg
 
-# ติดตั้ง ClickHouse Operator
-helm install clickhouse-operator clickhouse-operator/clickhouse-operator \
-  --namespace clickhouse \
-  --create-namespace
+echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" | \
+  sudo tee /etc/apt/sources.list.d/clickhouse.list
+
+sudo apt update
+sudo apt install -y clickhouse-server clickhouse-client
+
+sudo systemctl enable clickhouse-server
+sudo systemctl start clickhouse-server
+sudo systemctl status clickhouse-server
 ```
 
-```yaml
-# clickhouse-cluster.yaml
-apiVersion: "clickhouse.altinity.com/v1"
-kind: "ClickHouseInstallation"
-metadata:
-  name: chuaikan-analytics
-  namespace: clickhouse
-spec:
-  configuration:
-    zookeeper:
-      nodes:
-        - host: zookeeper.clickhouse
-          port: 2181
-    
-    clusters:
-      - name: "chuaikan"
-        layout:
-          shardsCount: 2     # 2 shards
-          replicasCount: 2   # 2 replicas per shard
-        
-        templates:
-          podTemplate: clickhouse-pod
-          dataVolumeClaimTemplate: data-volume
-  
-  templates:
-    podTemplates:
-      - name: clickhouse-pod
-        spec:
-          containers:
-          - name: clickhouse
-            image: clickhouse/clickhouse-server:23.12
-            resources:
-              requests:
-                memory: "4Gi"
-                cpu: "2"
-              limits:
-                memory: "8Gi"
-                cpu: "4"
-    
-    volumeClaimTemplates:
-      - name: data-volume
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: 500Gi
-          storageClassName: gp3
-```
+### Step 1032: ติดตั้ง Grafana
 
 ```bash
-kubectl apply -f clickhouse-cluster.yaml
+# Grafana OSS
+sudo apt-get install -y apt-transport-https software-properties-common
+wget -q -O - https://packages.grafana.com/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/grafana.gpg
+echo "deb [signed-by=/usr/share/keyrings/grafana.gpg] https://packages.grafana.com/oss/deb stable main" | \
+  sudo tee -a /etc/apt/sources.list.d/grafana.list
 
-# รอ cluster พร้อม
-kubectl get clickhouseinstallation -n clickhouse
-# NAME                 STATUS    CLUSTERS  SHARDS  HOSTS   AGE
-# chuaikan-analytics   Complete  1         2       4       5m
+sudo apt update
+sudo apt install -y grafana
+
+# ติดตั้ง ClickHouse datasource plugin
+sudo grafana-cli plugins install grafana-clickhouse-datasource
+sudo systemctl enable grafana-server
+sudo systemctl start grafana-server
+# เปิด http://localhost:3001 (admin/admin)
 ```
 
 ---
 
 ## 🛠️ Step-by-Step Implementation
 
-### Step 1031: สร้าง Schema ใน ClickHouse
+### Step 1033: ClickHouse Schema
 
 ```sql
--- ต่อ ClickHouse
-kubectl exec -n clickhouse chi-chuaikan-analytics-chuaikan-0-0-0 -- \
-  clickhouse-client --user default --password $CH_PASSWORD
+-- สร้าง database
+CREATE DATABASE IF NOT EXISTS chuaikan;
 
--- สร้าง Database
-CREATE DATABASE IF NOT EXISTS analytics ON CLUSTER chuaikan;
-
--- Events Table (Distributed)
-CREATE TABLE IF NOT EXISTS analytics.events ON CLUSTER chuaikan
-(
-    event_id      UUID,
-    event_type    LowCardinality(String),   -- post/like/comment/sos/login
-    user_id       UInt64,
-    session_id    String,
-    
-    -- Location
-    region        LowCardinality(String),
-    province      LowCardinality(String),
-    lat           Float32,
-    lng           Float32,
-    
-    -- Content
-    sos_id        Nullable(UInt64),
-    sos_severity  LowCardinality(Nullable(String)),  -- critical/high/medium/low
-    
-    -- Time
-    event_time    DateTime,
-    event_date    Date MATERIALIZED toDate(event_time),
-    event_hour    UInt8 MATERIALIZED toHour(event_time),
-    
-    -- Device
-    platform      LowCardinality(String),  -- ios/android/web
-    app_version   String,
-    
-    -- Metadata
-    processing_time_ms UInt32,
-    created_at    DateTime DEFAULT now()
+-- Events table (raw data)
+CREATE TABLE chuaikan.events (
+    event_id     String,
+    user_id      String,
+    action       LowCardinality(String),
+    target_id    String,
+    target_type  LowCardinality(String),
+    metadata     String,  -- JSON
+    province     LowCardinality(String),
+    timestamp    DateTime64(3),  -- milliseconds precision
+    date         Date MATERIALIZED toDate(timestamp)
 )
-ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/events', '{replica}')
-PARTITION BY (event_date, region)
-ORDER BY (event_time, event_type, user_id)
-TTL event_date + INTERVAL 90 DAY DELETE  -- เก็บแค่ 90 วัน
-SETTINGS index_granularity = 8192;
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(date)
+ORDER BY (timestamp, user_id)
+TTL date + INTERVAL 90 DAY;
 
--- Distributed Table
-CREATE TABLE analytics.events_dist ON CLUSTER chuaikan AS analytics.events
-ENGINE = Distributed(chuaikan, analytics, events, rand());
+-- SOS events table
+CREATE TABLE chuaikan.sos_events (
+    event_id     String,
+    post_id      String,
+    user_id      String,
+    alert_type   LowCardinality(String),
+    severity     LowCardinality(String),
+    province     LowCardinality(String),
+    lat          Float64,
+    lng          Float64,
+    description  String,
+    status       LowCardinality(String) DEFAULT 'active',
+    timestamp    DateTime64(3),
+    date         Date MATERIALIZED toDate(timestamp)
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(date)
+ORDER BY (timestamp, province, severity)
+TTL date + INTERVAL 365 DAY;
+
+-- Push notification analytics
+CREATE TABLE chuaikan.push_analytics (
+    notification_id  String,
+    user_id          String,
+    token_platform   LowCardinality(String),
+    status           LowCardinality(String),  -- delivered/opened/dismissed/failed
+    timestamp        DateTime64(3),
+    date             Date MATERIALIZED toDate(timestamp)
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(date)
+ORDER BY (timestamp, status);
 ```
 
-```sql
--- Materialized View สำหรับ real-time aggregations
--- CalculateCounterทันทีเมื่อ data เข้า
+### Step 1034: Materialized Views สำหรับ Real-time Metrics
 
--- Active users by region (updated every insert)
-CREATE MATERIALIZED VIEW analytics.active_users_by_region_mv
-ON CLUSTER chuaikan
+```sql
+-- Active users ใน 5 นาทีที่ผ่านมา
+CREATE MATERIALIZED VIEW chuaikan.active_users_5min
+ENGINE = AggregatingMergeTree()
+ORDER BY (window_start)
+POPULATE AS
+SELECT
+    toStartOfFiveMinutes(timestamp) as window_start,
+    uniqState(user_id) as unique_users
+FROM chuaikan.events
+GROUP BY window_start;
+
+-- Query: DAU (today)
+-- SELECT uniqMerge(unique_users) FROM chuaikan.active_users_5min
+-- WHERE window_start >= toStartOfDay(now());
+
+-- Posts per minute (rolling window)
+CREATE MATERIALIZED VIEW chuaikan.posts_per_minute
 ENGINE = SummingMergeTree()
-PARTITION BY toDate(window_start)
-ORDER BY (window_start, region)
-POPULATE
-AS SELECT
-    toStartOfMinute(event_time) AS window_start,
-    region,
-    uniqState(user_id)           AS unique_users_state,
-    count()                      AS events_count
-FROM analytics.events
-GROUP BY window_start, region;
+ORDER BY (minute)
+POPULATE AS
+SELECT
+    toStartOfMinute(timestamp) as minute,
+    countIf(action = 'post_created') as post_count,
+    countIf(action = 'like') as like_count,
+    countIf(action = 'comment') as comment_count
+FROM chuaikan.events
+GROUP BY minute;
+
+-- SOS alerts by province (live)
+CREATE MATERIALIZED VIEW chuaikan.sos_by_province_live
+ENGINE = SummingMergeTree()
+ORDER BY (province, alert_type, severity)
+POPULATE AS
+SELECT
+    province,
+    alert_type,
+    severity,
+    count() as alert_count,
+    max(timestamp) as last_alert
+FROM chuaikan.sos_events
+WHERE status = 'active'
+  AND timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY province, alert_type, severity;
+
+-- Hourly user activity heatmap
+CREATE MATERIALIZED VIEW chuaikan.hourly_activity
+ENGINE = SummingMergeTree()
+ORDER BY (date, hour)
+POPULATE AS
+SELECT
+    toDate(timestamp) as date,
+    toHour(timestamp) as hour,
+    count() as event_count,
+    uniq(user_id) as unique_users
+FROM chuaikan.events
+GROUP BY date, hour;
 ```
 
-### Step 1032: Kafka → ClickHouse Streaming
+### Step 1035: Kafka → ClickHouse Pipeline
 
 ```sql
--- ClickHouse Kafka Engine — อ่าน messages จาก Kafka โดยตรง!
-
-CREATE TABLE analytics.events_kafka_queue
+-- Kafka Table Engine (อ่านจาก Kafka โดยตรง)
+CREATE TABLE chuaikan.kafka_events
 (
-    raw_data String
+    event_id   String,
+    user_id    String,
+    action     String,
+    target_id  String,
+    metadata   String,
+    timestamp  String
 )
 ENGINE = Kafka
 SETTINGS
-    kafka_broker_list = 'kafka.kafka:9092',
-    kafka_topic_list = 'app-events',
+    kafka_broker_list = 'localhost:9092',
+    kafka_topic_list = 'user-events',
     kafka_group_name = 'clickhouse-consumer',
-    kafka_format = 'JSONAsString',
-    kafka_num_consumers = 4,
-    kafka_max_block_size = 1000,
-    kafka_poll_timeout_ms = 500;
+    kafka_format = 'JSONEachRow',
+    kafka_max_block_size = 65536;
 
--- Materialized View ที่แปลง raw Kafka message เป็น structured data
-CREATE MATERIALIZED VIEW analytics.events_kafka_mv TO analytics.events_dist AS
+-- Materialized view ที่เขียนจาก Kafka → events table
+CREATE MATERIALIZED VIEW chuaikan.kafka_events_mv TO chuaikan.events AS
 SELECT
-    toUUID(JSONExtractString(raw_data, 'event_id'))   AS event_id,
-    JSONExtractString(raw_data, 'event_type')          AS event_type,
-    JSONExtractUInt(raw_data, 'user_id')               AS user_id,
-    JSONExtractString(raw_data, 'session_id')          AS session_id,
-    JSONExtractString(raw_data, 'region')              AS region,
-    JSONExtractString(raw_data, 'province')            AS province,
-    JSONExtractFloat(raw_data, 'lat')                  AS lat,
-    JSONExtractFloat(raw_data, 'lng')                  AS lng,
-    JSONExtractUInt(raw_data, 'sos_id')                AS sos_id,
-    JSONExtractString(raw_data, 'sos_severity')        AS sos_severity,
-    toDateTime(JSONExtractString(raw_data, 'event_time')) AS event_time,
-    JSONExtractString(raw_data, 'platform')            AS platform,
-    JSONExtractString(raw_data, 'app_version')         AS app_version,
-    JSONExtractUInt(raw_data, 'processing_time_ms')    AS processing_time_ms
-FROM analytics.events_kafka_queue;
+    event_id,
+    user_id,
+    action,
+    target_id,
+    'post' AS target_type,
+    metadata,
+    JSONExtractString(metadata, 'province') as province,
+    parseDateTimeBestEffort(timestamp) as timestamp
+FROM chuaikan.kafka_events;
+
+-- SOS Kafka pipeline
+CREATE TABLE chuaikan.kafka_sos
+(
+    event_id    String,
+    post_id     String,
+    user_id     String,
+    alert_type  String,
+    severity    String,
+    location    String,
+    description String,
+    timestamp   String
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'localhost:9092',
+    kafka_topic_list = 'sos-alerts',
+    kafka_group_name = 'clickhouse-sos-consumer',
+    kafka_format = 'JSONEachRow';
+
+CREATE MATERIALIZED VIEW chuaikan.kafka_sos_mv TO chuaikan.sos_events AS
+SELECT
+    event_id,
+    post_id,
+    user_id,
+    alert_type,
+    severity,
+    JSONExtractString(location, 'province') as province,
+    toFloat64OrZero(JSONExtractString(location, 'lat')) as lat,
+    toFloat64OrZero(JSONExtractString(location, 'lng')) as lng,
+    description,
+    'active' as status,
+    parseDateTimeBestEffort(timestamp) as timestamp
+FROM chuaikan.kafka_sos;
 ```
 
-### Step 1033: Real-time Queries
+### Step 1036: ClickHouse Queries สำหรับ Grafana
 
 ```sql
--- Query 1: DAU (Daily Active Users) Real-time
+-- Panel 1: Live DAU (ทุก 30 วินาที)
 SELECT
-    toDate(event_time) AS date,
-    uniq(user_id)      AS dau
-FROM analytics.events_dist
-WHERE event_date >= today() - 7
-GROUP BY date
-ORDER BY date;
+    uniq(user_id) as dau
+FROM chuaikan.events
+WHERE date = today()
+  AND timestamp >= toStartOfDay(now());
 
--- Query 2: Events per second (เพื่อดู spike)
+-- Panel 2: Posts per second (time series)
 SELECT
-    toStartOfSecond(event_time) AS second,
-    count()                      AS events_per_second
-FROM analytics.events_dist
-WHERE event_time >= now() - INTERVAL 60 SECOND
-GROUP BY second
-ORDER BY second;
+    toStartOfMinute(timestamp) as time,
+    countIf(action = 'post_created') / 60 as posts_per_second,
+    countIf(action = 'like') / 60 as likes_per_second
+FROM chuaikan.events
+WHERE timestamp >= now() - INTERVAL 1 HOUR
+GROUP BY time
+ORDER BY time;
 
--- Query 3: SOS Hotspots (สำหรับ emergency dashboard)
+-- Panel 3: Active SOS by province (map)
 SELECT
     province,
-    count()                    AS sos_count,
-    countIf(sos_severity='critical') AS critical_count,
-    min(event_time)            AS first_sos,
-    max(event_time)            AS last_sos
-FROM analytics.events_dist
-WHERE event_type = 'sos'
-  AND event_time >= now() - INTERVAL 6 HOUR
+    count() as active_sos,
+    countIf(severity = 'critical') as critical_count,
+    max(timestamp) as last_alert
+FROM chuaikan.sos_events
+WHERE status = 'active'
+  AND timestamp >= now() - INTERVAL 24 HOUR
 GROUP BY province
-ORDER BY sos_count DESC
-LIMIT 20;
+ORDER BY active_sos DESC;
 
--- Query 4: User Spike Detection (>2x normal)
+-- Panel 4: Error rate by service (ต้องมี error logs table)
 SELECT
-    toStartOfMinute(event_time) AS minute,
-    count()                      AS events,
-    -- ค่าเฉลี่ย 7 วันที่ผ่านมาใน timeframe เดียวกัน
-    avg(count()) OVER (
-        ORDER BY minute
-        ROWS BETWEEN 10080 PRECEDING AND 1 PRECEDING  -- 7 days * 60 * 24
-    ) AS expected_events,
-    count() / avg(count()) OVER (
-        ORDER BY minute
-        ROWS BETWEEN 10080 PRECEDING AND 1 PRECEDING
-    ) AS spike_ratio
-FROM analytics.events_dist
-WHERE event_time >= now() - INTERVAL 2 HOUR
-GROUP BY minute
-ORDER BY minute DESC
-HAVING spike_ratio > 2.0;  -- Spike = >2x normal
+    service_name,
+    countIf(level = 'error') as errors,
+    count() as total,
+    round(countIf(level = 'error') / count() * 100, 2) as error_rate_pct
+FROM chuaikan.logs
+WHERE timestamp >= now() - INTERVAL 5 MINUTE
+GROUP BY service_name;
+
+-- Panel 5: Queue depth (BullMQ jobs)
+-- ดึงจาก Redis ผ่าน Node.js exporter
+SELECT
+    queue_name,
+    waiting_jobs,
+    active_jobs,
+    failed_jobs
+FROM chuaikan.queue_metrics
+WHERE timestamp >= now() - INTERVAL 1 MINUTE
+ORDER BY timestamp DESC
+LIMIT 5;
 ```
 
-### Step 1034: Grafana Dashboard Configuration
+### Step 1037: Anomaly Detection
 
-```json
-{
-  "dashboard": {
-    "title": "chuaikan.com Operations Dashboard",
-    "tags": ["operations", "realtime"],
-    "refresh": "5s",
-    
-    "panels": [
-      {
-        "id": 1,
-        "title": "Live DAU (Today)",
-        "type": "stat",
-        "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
-        "targets": [{
-          "datasource": "ClickHouse",
-          "rawSql": "SELECT uniq(user_id) FROM analytics.events_dist WHERE event_date = today()",
-          "format": "table"
-        }],
-        "options": {
-          "colorMode": "background",
-          "thresholds": {
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 800000},
-              {"color": "red", "value": 950000}
-            ]
-          }
-        }
-      },
-      
-      {
-        "id": 2,
-        "title": "Events/Second (Live)",
-        "type": "timeseries",
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
-        "targets": [{
-          "datasource": "ClickHouse",
-          "rawSql": "SELECT toStartOfSecond(event_time) AS t, count() AS v FROM analytics.events_dist WHERE event_time >= now() - INTERVAL 5 MINUTE GROUP BY t ORDER BY t",
-          "format": "time_series"
-        }]
-      },
-      
-      {
-        "id": 3,
-        "title": "Active SOS Alerts Map",
-        "type": "geomap",
-        "gridPos": {"h": 12, "w": 12, "x": 12, "y": 0},
-        "targets": [{
-          "datasource": "ClickHouse",
-          "rawSql": "SELECT lat, lng, sos_severity, count() AS count FROM analytics.events_dist WHERE event_type = 'sos' AND event_time >= now() - INTERVAL 6 HOUR GROUP BY lat, lng, sos_severity"
-        }],
-        "options": {
-          "layers": [{
-            "type": "heatmap",
-            "config": {
-              "weight": { "field": "count" }
-            }
-          }]
-        }
-      }
-    ]
+```typescript
+// src/lib/analytics/anomaly-detector.ts
+import ClickHouse from '@clickhouse/client';
+import { redis } from '../redis/redis-client';
+
+const clickhouse = createClient({
+  host: process.env.CLICKHOUSE_HOST || 'http://localhost:8123',
+  database: 'chuaikan',
+});
+
+function createClient(config: any) {
+  return new (require('@clickhouse/client').createClient)(config);
+}
+
+export async function checkDAUAnomaly(): Promise<void> {
+  // เปรียบเทียบ DAU ปัจจุบันกับ 30 นาทีที่แล้ว
+  const result = await clickhouse.query({
+    query: `
+      SELECT
+        uniqIf(user_id, timestamp >= now() - INTERVAL 5 MINUTE) as dau_now,
+        uniqIf(user_id, timestamp >= now() - INTERVAL 35 MINUTE
+                      AND timestamp < now() - INTERVAL 30 MINUTE) as dau_30min_ago
+      FROM chuaikan.events
+      WHERE date = today()
+    `,
+    format: 'JSONEachRow',
+  });
+
+  const rows = await result.json() as any[];
+  if (rows.length === 0) return;
+
+  const { dau_now, dau_30min_ago } = rows[0];
+
+  if (dau_30min_ago > 0) {
+    const dropPercent = ((dau_30min_ago - dau_now) / dau_30min_ago) * 100;
+
+    if (dropPercent > 20) {
+      console.error(`[Anomaly] DAU dropped ${dropPercent.toFixed(1)}% in 5 minutes!`);
+      await sendAlertToSlack({
+        severity: 'critical',
+        message: `DAU dropped ${dropPercent.toFixed(1)}% in 5 minutes (${dau_30min_ago} → ${dau_now})`,
+        service: 'chuaikan-analytics',
+      });
+    }
   }
+}
+
+async function sendAlertToSlack(alert: any) {
+  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  await fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text: `🚨 *${alert.severity.toUpperCase()}*: ${alert.message}`,
+      attachments: [{ color: 'danger', text: `Service: ${alert.service}` }],
+    }),
+  });
+}
+
+// Run ทุก 5 นาที
+setInterval(checkDAUAnomaly, 5 * 60 * 1000);
+```
+
+### Step 1038: SOS Command Center
+
+```typescript
+// src/app/api/admin/sos-command/route.ts
+import { NextResponse } from 'next/server';
+import { clickhouseClient } from '@/lib/analytics/clickhouse-client';
+
+export async function GET() {
+  // Active SOS by severity and location
+  const [activeSOS, heatmapData, responseTeams] = await Promise.all([
+    clickhouseClient.query({
+      query: `
+        SELECT
+            post_id, user_id, alert_type, severity,
+            province, lat, lng, description,
+            timestamp,
+            dateDiff('minute', timestamp, now()) as minutes_ago
+        FROM chuaikan.sos_events
+        WHERE status = 'active'
+          AND timestamp >= now() - INTERVAL 48 HOUR
+        ORDER BY severity DESC, timestamp DESC
+        LIMIT 100
+      `,
+      format: 'JSONEachRow',
+    }).then(r => r.json()),
+
+    clickhouseClient.query({
+      query: `
+        SELECT province, count() as count,
+               countIf(severity='critical') as critical,
+               countIf(severity='high') as high
+        FROM chuaikan.sos_events
+        WHERE status = 'active'
+          AND timestamp >= now() - INTERVAL 24 HOUR
+        GROUP BY province
+        ORDER BY count DESC
+      `,
+      format: 'JSONEachRow',
+    }).then(r => r.json()),
+
+    // Response teams จาก PostgreSQL
+    fetch('/api/admin/response-teams').then(r => r.json()),
+  ]);
+
+  return NextResponse.json({
+    activeSOS,
+    heatmapData,
+    responseTeams,
+    generatedAt: new Date().toISOString(),
+  });
 }
 ```
 
-### Step 1035: SOS Cluster Detection Alert
+### Step 1039: Grafana Alerting
 
-```python
-# sos-cluster-detector.py
-# ตรวจจับ SOS alerts ที่กระจุกตัวในพื้นที่เดียวกัน = disaster!
+```yaml
+# grafana/alerting/line-notify.yml
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: Line Notify
+    receivers:
+      - uid: line-notify-uid
+        type: webhook
+        settings:
+          url: https://notify-api.line.me/api/notify
+          httpMethod: POST
+          headers:
+            Authorization: "Bearer ${LINE_NOTIFY_TOKEN}"
+          message: "🚨 chuaikan.com Alert: {{ .Message }}"
 
-from sklearn.cluster import DBSCAN
-import numpy as np
-import clickhouse_driver
-import json
-from datetime import datetime, timedelta
+  - orgId: 1
+    name: Discord
+    receivers:
+      - uid: discord-uid
+        type: discord
+        settings:
+          url: "${DISCORD_WEBHOOK_URL}"
+          message: "🚨 **chuaikan.com Alert**\n{{ .Message }}"
+```
 
-class SOSClusterDetector:
-    def __init__(self):
-        self.ch_client = clickhouse_driver.Client(
-            host='clickhouse.clickhouse',
-            user='analytics',
-            password=os.environ['CH_PASSWORD'],
-            database='analytics'
-        )
-    
-    def detect_clusters(self, time_window_hours=1, min_cluster_size=5):
-        """ตรวจจับ SOS cluster ที่อาจเป็น disaster event"""
-        
-        # ดึง SOS locations ใน time window
-        query = """
-        SELECT lat, lng, sos_severity, user_id, event_time
-        FROM analytics.events_dist
-        WHERE event_type = 'sos'
-          AND event_time >= now() - INTERVAL %s HOUR
-          AND lat != 0 AND lng != 0
-        """
-        
-        rows = self.ch_client.execute(query, (time_window_hours,))
-        
-        if len(rows) < min_cluster_size:
-            return []
-        
-        # Convert to numpy array
-        coords = np.array([[row[0], row[1]] for row in rows])
-        
-        # DBSCAN clustering
-        # eps=0.05 ≈ 5km (1 degree lat/lng ≈ 111km)
-        dbscan = DBSCAN(eps=0.05, min_samples=min_cluster_size, algorithm='ball_tree', metric='haversine')
-        labels = dbscan.fit_predict(np.radians(coords))
-        
-        clusters = []
-        for cluster_id in set(labels):
-            if cluster_id == -1:  # Noise points
-                continue
-            
-            cluster_mask = labels == cluster_id
-            cluster_points = [rows[i] for i in range(len(rows)) if cluster_mask[i]]
-            cluster_coords = coords[cluster_mask]
-            
-            # คำนวณ cluster stats
-            center_lat = np.mean(cluster_coords[:, 0])
-            center_lng = np.mean(cluster_coords[:, 1])
-            
-            severities = [row[2] for row in cluster_points]
-            critical_count = sum(1 for s in severities if s == 'critical')
-            
-            clusters.append({
-                'cluster_id': int(cluster_id),
-                'center_lat': float(center_lat),
-                'center_lng': float(center_lng),
-                'sos_count': len(cluster_points),
-                'critical_count': critical_count,
-                'severity': 'critical' if critical_count > 0 else 'high',
-                'first_sos': min(row[4] for row in cluster_points).isoformat(),
-                'user_count': len(set(row[3] for row in cluster_points)),
-            })
-        
-        return clusters
-    
-    def notify_if_new_cluster(self, clusters):
-        """แจ้งเตือนถ้าพบ cluster ใหม่"""
-        for cluster in clusters:
-            cache_key = f"sos_cluster:{cluster['cluster_id']}"
-            
-            if not redis.exists(cache_key):
-                # Cluster ใหม่! แจ้งเตือน
-                self.send_cluster_alert(cluster)
-                redis.setex(cache_key, 3600, json.dumps(cluster))  # cache 1 hour
-    
-    def send_cluster_alert(self, cluster):
-        """ส่ง alert ไปทีม emergency response"""
-        message = {
-            'alert_type': 'sos_cluster_detected',
-            'severity': cluster['severity'],
-            'location': {
-                'lat': cluster['center_lat'],
-                'lng': cluster['center_lng'],
-            },
-            'stats': {
-                'sos_count': cluster['sos_count'],
-                'critical_count': cluster['critical_count'],
-                'affected_users': cluster['user_count'],
-            },
-            'timestamp': datetime.utcnow().isoformat(),
-        }
-        
-        # ส่งไป PagerDuty
-        requests.post(
-            'https://events.pagerduty.com/v2/enqueue',
-            json={
-                'routing_key': os.environ['PAGERDUTY_KEY'],
-                'event_action': 'trigger',
-                'payload': {
-                    'summary': f"SOS Cluster Detected: {cluster['sos_count']} alerts near {cluster['center_lat']:.4f},{cluster['center_lng']:.4f}",
-                    'severity': cluster['severity'],
-                    'custom_details': message,
-                }
-            }
-        )
+```yaml
+# grafana/alerting/rules.yml
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: chuaikan-critical
+    folder: chuaikan
+    interval: 1m
+    rules:
+      - uid: dau-drop-alert
+        title: DAU Drop >20%
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            model:
+              rawSql: |
+                SELECT
+                  uniqIf(user_id, timestamp >= now() - INTERVAL 5 MINUTE) as dau_now,
+                  uniqIf(user_id, timestamp BETWEEN now() - INTERVAL 35 MINUTE AND now() - INTERVAL 30 MINUTE) as dau_prev
+                FROM chuaikan.events WHERE date = today()
+        noDataState: OK
+        execErrState: Alerting
+        annotations:
+          summary: "DAU dropped significantly"
+          description: "Current DAU is {{ $values.A.dau_now }}, was {{ $values.A.dau_prev }}"
+        labels:
+          severity: critical
+          team: engineering
 ```
 
 ---
 
 ## 🔧 Configuration Files
 
-### ClickHouse Backup
+### ClickHouse config สำหรับ Performance
 
-```bash
-#!/bin/bash
-# clickhouse-backup.sh
-
-DATE=$(date +%Y%m%d)
-BACKUP_DIR="s3://chuaikan-backups/clickhouse/$DATE"
-
-# ใช้ clickhouse-backup tool
-clickhouse-backup create --config /etc/clickhouse-backup/config.yaml "backup-$DATE"
-clickhouse-backup upload --config /etc/clickhouse-backup/config.yaml "backup-$DATE"
-
-echo "Backup completed: $BACKUP_DIR"
+```xml
+<!-- /etc/clickhouse-server/config.d/custom.xml -->
+<clickhouse>
+  <max_memory_usage>8000000000</max_memory_usage>
+  <max_concurrent_queries>100</max_concurrent_queries>
+  
+  <!-- Kafka integration -->
+  <kafka>
+    <auto_offset_reset>latest</auto_offset_reset>
+    <max_poll_interval_ms>300000</max_poll_interval_ms>
+  </kafka>
+</clickhouse>
 ```
 
 ---
 
 ## 🧪 Testing
 
-### Dashboard Performance Test
+### Test ClickHouse Query Speed
 
-```python
-# test-analytics-queries.py
+```bash
+# ทดสอบ query speed บน 1 ล้าน rows
+clickhouse-client --query "
+  INSERT INTO chuaikan.events
+  SELECT
+    generateUUIDv4() as event_id,
+    concat('user-', toString(rand() % 100000)) as user_id,
+    ['view','like','comment','share'][rand() % 4 + 1] as action,
+    generateUUIDv4() as target_id,
+    'post' as target_type,
+    '{}' as metadata,
+    ['Bangkok','Chiang Mai','Ayutthaya'][rand() % 3 + 1] as province,
+    now() - toIntervalSecond(rand() % 86400) as timestamp
+  FROM numbers(1000000)
+"
 
-def test_dau_query_performance():
-    """DAU query ต้องเร็วกว่า 100ms"""
-    import time
-    
-    start = time.time()
-    result = ch_client.execute(
-        "SELECT uniq(user_id) FROM analytics.events_dist WHERE event_date = today()"
-    )
-    duration = (time.time() - start) * 1000
-    
-    assert duration < 100, f"DAU query too slow: {duration:.0f}ms"
-    print(f"DAU query: {duration:.0f}ms ✅")
-
-def test_sos_cluster_detection():
-    """Cluster detection ต้องทำงานได้"""
-    detector = SOSClusterDetector()
-    clusters = detector.detect_clusters(time_window_hours=24)
-    
-    # ถ้ามี data ต้องได้ list (อาจ empty)
-    assert isinstance(clusters, list)
-    print(f"Detected {len(clusters)} SOS clusters")
+# Query ความเร็ว
+time clickhouse-client --query "SELECT count(), uniq(user_id) FROM chuaikan.events WHERE date = today()"
+# คาดว่า: < 100ms
 ```
 
 ---
 
 ## ❌ Common Errors & Solutions
 
-### Error 1: ClickHouse Disk Full
+### Error 1: Kafka Consumer Lag ใน ClickHouse
 
-```bash
-# ตรวจ disk usage
-SELECT
-    database,
-    table,
-    formatReadableSize(sum(bytes)) AS size,
-    sum(rows) AS rows
-FROM system.parts
-WHERE active
-GROUP BY database, table
-ORDER BY sum(bytes) DESC;
-
-# ถ้า TTL ไม่ทำงาน → Force TTL execution
-ALTER TABLE analytics.events ON CLUSTER chuaikan
-    MATERIALIZE TTL;
+**ตรวจสอบ:**
+```sql
+SELECT * FROM system.kafka_consumers;
 ```
 
-### Error 2: Kafka Consumer Lag
+**แก้ไข:**
+```sql
+-- Detach และ re-attach table
+DETACH TABLE chuaikan.kafka_events;
+ATTACH TABLE chuaikan.kafka_events;
+```
 
-```bash
-# ตรวจ consumer group lag
-kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
-  --describe --group clickhouse-consumer
+### Error 2: ClickHouse Memory เกิน
 
-# ถ้า lag สูง → เพิ่ม consumer หรือ batch size
-ALTER TABLE analytics.events_kafka_queue
-    MODIFY SETTING kafka_num_consumers = 8;
+**แก้ไข:**
+```sql
+-- ลด max memory per query
+SET max_memory_usage = 4000000000;
+
+-- หรือใช้ LIMIT ใน query
+SELECT * FROM chuaikan.events LIMIT 100000;
 ```
 
 ---
 
 ## ✅ Checklist
 
-- [ ] ClickHouse cluster ติดตั้งแล้ว (2 shards × 2 replicas)
-- [ ] Schema สร้างแล้วพร้อม TTL policy
-- [ ] Kafka → ClickHouse pipeline ทำงาน
-- [ ] Grafana Dashboard แสดง DAU, Events/sec, SOS map
-- [ ] Dashboard refresh rate: 5 วินาที
-- [ ] SOS Cluster Detection algorithm ทำงาน
-- [ ] Emergency Responder Dashboard แยกต่างหาก
-- [ ] Query performance: DAU < 100ms, SOS hotspot < 500ms
-- [ ] ClickHouse backup daily ไป S3
-- [ ] Anomaly detection alerts ตั้งค่าแล้ว
+- [ ] **Step 1031:** ClickHouse ติดตั้งสำเร็จ, รันที่ port 8123
+- [ ] **Step 1032:** Grafana รันที่ port 3001, ClickHouse datasource เชื่อมต่อได้
+- [ ] **Step 1033:** ClickHouse schema สร้างครบ (events, sos_events, push_analytics)
+- [ ] **Step 1034:** Materialized views ทำงาน (active_users_5min, posts_per_minute)
+- [ ] **Step 1035:** Kafka → ClickHouse pipeline streaming events ได้
+- [ ] **Step 1036:** Grafana panels แสดงข้อมูล real-time
+- [ ] **Step 1037:** Anomaly detection แจ้งเตือนเมื่อ DAU drop >20%
+- [ ] **Step 1038:** SOS Command Center แสดง active alerts
+- [ ] **Step 1039:** Grafana alerting ส่ง Line Notify และ Discord
+- [ ] **Step 1040:** Dashboard refresh ทุก 30 วินาที performance ดี
 
 ---
 
 ## 🔗 References
 
-- [ClickHouse Documentation](https://clickhouse.com/docs)
-- [ClickHouse + Kafka Integration](https://clickhouse.com/docs/en/integrations/kafka)
+- [ClickHouse Documentation](https://clickhouse.com/docs/)
+- [ClickHouse Kafka Engine](https://clickhouse.com/docs/en/engines/table-engines/integrations/kafka)
 - [Grafana ClickHouse Plugin](https://grafana.com/grafana/plugins/grafana-clickhouse-datasource/)
-- [DBSCAN Algorithm](https://scikit-learn.org/stable/modules/clustering.html#dbscan)
-- [ClickHouse Operator](https://github.com/Altinity/clickhouse-operator)
+- [Line Notify API](https://notify-bot.line.me/doc/en/)
 
 ---
-
 *Part 104 | Road to 1,000,000 Users/Day | chuaikan.com*
